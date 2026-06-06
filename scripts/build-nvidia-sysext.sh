@@ -159,13 +159,16 @@ write_extension_release() {
 #                          rest of the build (modules.dep, staging) is consistent.
 #   --no-drm,
 #   --install-libglvnd,
-#   --no-systemd           present on modern installers; older ones may lack one
-#                          or more. We only pass flags the installer advertises.
+#   --no-systemd,
+#   --allow-installation-with-running-driver
+#                          present on modern installers; older branches (e.g.
+#                          470) may lack one or more. Passing an unknown flag
+#                          makes the .run abort with "unrecognized option", so
+#                          we only pass flags the installer advertises.
 #
 # Flags every supported .run understands (--silent, --kernel-source-path,
 # --kernel-name, --no-x-check, --no-nouveau-check, --no-backup,
-# --skip-module-load, --no-rebuild-initramfs, --allow-installation-with-
-# running-driver) are passed unconditionally.
+# --skip-module-load, --no-rebuild-initramfs) are passed unconditionally.
 #
 # Echoes the flag list, one per line. Reads RUN_FILE, NVIDIA_VERSION, and the
 # (already-normalized) NVIDIA_KERNEL_MODULE_TYPE from caller scope. It does NOT
@@ -182,7 +185,6 @@ select_installer_flags() {
         --silent \
         --kernel-source-path="$KERNEL_HEADERS_PATH" \
         --kernel-name="$KERNEL_VERSION" \
-        --allow-installation-with-running-driver \
         --no-rebuild-initramfs \
         --skip-module-load \
         --no-x-check \
@@ -196,7 +198,7 @@ select_installer_flags() {
 
     # Version-fragile flags: pass only if advertised.
     local flag
-    for flag in --no-systemd --no-drm --install-libglvnd; do
+    for flag in --no-systemd --no-drm --install-libglvnd --allow-installation-with-running-driver; do
         if printf '%s' "$help" | grep -q -- "$flag"; then
             printf '%s\n' "$flag"
         else
