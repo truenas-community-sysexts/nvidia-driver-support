@@ -1,0 +1,114 @@
+name: Build sysext (CI smoke)
+
+# Cross-compiles nvidia.raw for a few supported driver branches on a native
+# ubuntu-24.04 runner (same build path users get inside the on-host
+# ubuntu:24.04 container, minus docker). This is a SMOKE TEST only — it
+# catches upstream breakage (NVIDIA changes the .run installer, kernel header
+# path moves, a legacy installer drops a flag) before users hit it. Nothing is
+# published: NVIDIA's EULA prohibits redistributing the proprietary userspace,
+# so nvidia.raw is only ever assembled on the user's own host.
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/build-nvidia-sysext.sh'
+      - '.github/workflows/build-sysext.yml'
+  workflow_dispatch:
+    inputs:
+      nvidia_version:
+        description: 'Override: exact NVIDIA driver version (else builds the catalog matrix)'
+        required: false
+      truenas_version:
+        description: 'Override: TrueNAS version (else tracked-versions.json)'
+        required: false
+      kernel_module_type:
+        description: 'open | proprietary'
+        required: false
+        default: 'open'
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+      truenas: ${{ steps.set.outputs.truenas }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build the version matrix
+        id: set
+        env:
+          OV_NVIDIA: ${{ github.event.inputs.nvidia_version }}
+          OV_TRUENAS: ${{ github.event.inputs.truenas_version }}
+          OV_KMOD: ${{ github.event.inputs.kernel_module_type }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          cat = json.load(open("catalog/driver-catalog.json"))
+          tracked = json.load(open(".github/tracked-versions.json"))
+          truenas = os.environ.get("OV_TRUENAS") or tracked["truenas"]["version"]
+
+          def branch_version(name):
+              b = cat["branches"][name]
+              if "version" in b:
+                  return b["version"]
+              return cat["open_latest"][0]
+
+          ov = os.environ.get("OV_NVIDIA")
+          if ov:
+              entries = [{"label": ov, "nvidia": ov,
+                          "kmod": os.environ.get("OV_KMOD") or "open"}]
+          else:
+              # Smoke the supported branches only (best-effort ones don't
+              # cross-compile against the modern kernel without patches).
+              entries = [
+                  {"label": "latest-open", "nvidia": cat["open_latest"][0], "kmod": "open"},
+                  {"label": "legacy-580",  "nvidia": branch_version("legacy-580"), "kmod": "proprietary"},
+                  {"label": "legacy-470",  "nvidia": branch_version("legacy-470"), "kmod": "proprietary"},
+              ]
+          print("matrix=" + json.dumps({"include": entries}))
+          print("truenas=" + truenas)
+          PY
+
+      - name: Show matrix
+        run: |
+          echo 'TrueNAS: ${{ steps.set.outputs.truenas }}'
+          echo 'Matrix : ${{ steps.set.outputs.matrix }}'
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    name: build ${{ matrix.label }} (${{ matrix.nvidia }}, ${{ matrix.kmod }})
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential gcc-14 squashfs-tools kmod xz-utils \
+            bison flex libelf-dev bc rsync libssl-dev pkg-config \
+            pciutils gnupg ca-certificates wget curl
+
+      - name: Build nvidia.raw (smoke)
+        env:
+          TRUENAS: ${{ needs.prepare.outputs.truenas }}
+          NVIDIA: ${{ matrix.nvidia }}
+          KMOD: ${{ matrix.kmod }}
+        run: |
+          sudo --preserve-env=TRUENAS,NVIDIA,KMOD scripts/build-nvidia-sysext.sh \
+            --nvidia-version="$NVIDIA" \
+            --truenas-version="$TRUENAS" \
+            --kernel-module-type="$KMOD" \
+            --out=dist
+
+      - name: Verify output
+        run: |
+          test -f dist/nvidia.raw
+          echo "Built: $(du -h dist/nvidia.raw | cut -f1)"
+          unsquashfs -l dist/nvidia.raw | grep -E 'libnvidia-ml\.so|nvidia\.ko' | head

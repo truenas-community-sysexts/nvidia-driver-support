@@ -1,0 +1,75 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/**.sh'
+      - '.github/scripts/**'
+      - '.github/workflows/**.yml'
+      - 'catalog/driver-catalog.json'
+      - '.github/tracked-versions.json'
+  pull_request:
+    paths:
+      - 'scripts/**.sh'
+      - '.github/scripts/**'
+      - '.github/workflows/**.yml'
+      - 'catalog/driver-catalog.json'
+      - '.github/tracked-versions.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: shellcheck shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run shellcheck
+        run: |
+          shellcheck --severity=warning \
+            scripts/build-nvidia-sysext.sh \
+            scripts/build-on-host.sh \
+            scripts/install-nvidia-driver.sh \
+            scripts/uninstall-nvidia-driver.sh \
+            scripts/recover-stock-nvidia.sh \
+            scripts/nvidia-preinit-driver.sh \
+            .github/scripts/*.sh
+
+  catalog:
+    name: driver-catalog.json shape
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: .github/scripts/validate-catalog.sh
+
+  tracked-versions:
+    name: tracked-versions.json shape
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate tracked-versions.json
+        run: |
+          python3 - <<'PY'
+          import json, re, sys
+          with open(".github/tracked-versions.json") as f:
+              d = json.load(f)
+          tn = d.get("truenas", {})
+          if not re.match(r'^\d+\.\d+', str(tn.get("version", ""))):
+              print("truenas.version missing or malformed", file=sys.stderr); sys.exit(1)
+          if not tn.get("train"):
+              print("truenas.train missing", file=sys.stderr); sys.exit(1)
+          print("tracked-versions.json OK")
+          PY
+
+  actionlint:
+    name: actionlint workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download actionlint
+        run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+      - name: Run actionlint
+        run: ./actionlint -color -shellcheck "shellcheck --severity=warning"

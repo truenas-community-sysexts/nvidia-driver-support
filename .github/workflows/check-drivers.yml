@@ -1,0 +1,40 @@
+name: Refresh driver catalog
+
+# Daily scrape of NVIDIA's Linux driver index. Updates open_latest (newest N
+# open-capable drivers) and the legacy-branch version pins in
+# catalog/driver-catalog.json, then commits if anything changed. The picker in
+# install-nvidia-driver.sh reads this file, so this keeps `--list`,
+# `--branch=latest`, and the card-detected recommendation current without
+# manual upkeep.
+
+on:
+  schedule:
+    - cron: '17 6 * * *'   # 06:17 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Refresh catalog from NVIDIA index
+        run: python3 .github/scripts/refresh-catalog.py
+
+      - name: Validate refreshed catalog
+        run: .github/scripts/validate-catalog.sh
+
+      - name: Commit if changed
+        run: |
+          if git diff --quiet -- catalog/driver-catalog.json; then
+            echo "No catalog change."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add catalog/driver-catalog.json
+          git commit -m "catalog: refresh NVIDIA driver versions [skip ci]"
+          git push

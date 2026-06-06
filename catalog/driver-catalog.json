@@ -1,0 +1,75 @@
+{
+  "_comment": "Driver catalog for nvidia-driver-support. The picker in install-nvidia-driver.sh reads this. `open_latest` is the newest N open-capable production drivers (newest first); `branches` pins one version per legacy series; `chip_map` maps an NVIDIA chip prefix (from lspci, e.g. GP107 -> GP) to a recommended branch. This file is regenerated daily by .github/workflows/check-drivers.yml \u2014 hand-edits to open_latest/branches[].version will be overwritten. Seed values below are all real, shipping driver versions.",
+  "schema_version": 1,
+  "open_latest_count": 5,
+  "open_latest": [
+    "610.43.02",
+    "595.71.05",
+    "595.58.03",
+    "595.45.04",
+    "590.48.01"
+  ],
+  "branches": {
+    "latest": {
+      "track": "open_latest[0]",
+      "kmod": "open",
+      "support": "supported",
+      "note": "Newest open-module driver in open_latest (Turing and newer)."
+    },
+    "legacy-580": {
+      "version": "580.159.04",
+      "kmod": "proprietary",
+      "chips": [
+        "GM",
+        "GP",
+        "GV"
+      ],
+      "support": "supported",
+      "note": "Last branch for Maxwell/Pascal/Volta. Security-only through Oct 2028. Open modules need Turing+, so proprietary."
+    },
+    "legacy-470": {
+      "version": "470.256.02",
+      "kmod": "proprietary",
+      "chips": [
+        "GK"
+      ],
+      "support": "supported",
+      "note": "Last branch for Kepler. Builds against modern 6.x kernels."
+    },
+    "legacy-390": {
+      "version": "390.157",
+      "kmod": "proprietary",
+      "chips": [
+        "GF"
+      ],
+      "support": "best-effort",
+      "note": "Last branch for Fermi. Does NOT cross-compile against TrueNAS 6.x kernels unpatched \u2014 bring a patched .run via --custom-run."
+    },
+    "legacy-340": {
+      "version": "340.108",
+      "kmod": "proprietary",
+      "chips": [
+        "G8",
+        "G9",
+        "GT2"
+      ],
+      "support": "best-effort",
+      "note": "Last branch for Tesla G8x/G9x/GT2xx. Does NOT cross-compile against TrueNAS 6.x kernels unpatched \u2014 bring a patched .run via --custom-run."
+    }
+  },
+  "chip_map": {
+    "GK": "legacy-470",
+    "GM": "legacy-580",
+    "GP": "legacy-580",
+    "GV": "legacy-580",
+    "GF": "legacy-390",
+    "G8": "legacy-340",
+    "G9": "legacy-340",
+    "GT2": "legacy-340",
+    "TU": "latest",
+    "GA": "latest",
+    "AD": "latest",
+    "GB": "latest",
+    "GH": "latest"
+  }
+}
