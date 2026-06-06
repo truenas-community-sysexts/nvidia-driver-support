@@ -61,14 +61,16 @@ jobs:
               entries = [{"label": ov, "nvidia": ov,
                           "kmod": os.environ.get("OV_KMOD") or "open"}]
           else:
-              # legacy-470 is EOL upstream and only compiles against modern
-              # kernels with the vendored nvidia-470xx-linux-mainline patches;
-              # it's marked experimental (continue-on-error) until the patched
-              # path is proven stable across TrueNAS kernel bumps.
+              # Smoke a representative spread: the newest open driver (600
+              # series), the 580 branch in both open (Turing+) and proprietary
+              # (Maxwell/Pascal/Volta) flavors, and the 470 branch (Kepler),
+              # which only compiles against modern kernels with the vendored
+              # nvidia-470xx-linux-mainline patches.
               entries = [
                   {"label": "latest-open", "nvidia": cat["open_latest"][0], "kmod": "open"},
+                  {"label": "open-580",    "nvidia": branch_version("legacy-580"), "kmod": "open"},
                   {"label": "legacy-580",  "nvidia": branch_version("legacy-580"), "kmod": "proprietary"},
-                  {"label": "legacy-470",  "nvidia": branch_version("legacy-470"), "kmod": "proprietary", "experimental": True},
+                  {"label": "legacy-470",  "nvidia": branch_version("legacy-470"), "kmod": "proprietary"},
               ]
           print("matrix=" + json.dumps({"include": entries}))
           print("truenas=" + truenas)
@@ -86,8 +88,10 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     name: build ${{ matrix.label }} (${{ matrix.nvidia }}, ${{ matrix.kmod }})
-    # Experimental branches (e.g. legacy-470, built via vendored source patches)
-    # may break on an upstream patch/kernel drift without failing the run.
+    # An entry can opt into continue-on-error with "experimental": True in the
+    # matrix (none currently do) — e.g. a target built from a volatile external
+    # patch set — to stay visible without failing the run. legacy-470 is now a
+    # required build.
     continue-on-error: ${{ matrix.experimental || false }}
     steps:
       - uses: actions/checkout@v6
