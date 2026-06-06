@@ -157,6 +157,12 @@ write_extension_release() {
 #                          passing it makes the installer abort. We drop it and
 #                          force NVIDIA_KERNEL_MODULE_TYPE=proprietary so the
 #                          rest of the build (modules.dep, staging) is consistent.
+#   --kernel-module-type   only exists on 515+ (the open/proprietary split).
+#   --no-rebuild-initramfs,
+#   --skip-module-load,
+#   --no-x-check,
+#   --no-nouveau-check,
+#   --no-backup,
 #   --no-drm,
 #   --install-libglvnd,
 #   --no-systemd,
@@ -164,11 +170,13 @@ write_extension_release() {
 #                          present on modern installers; older branches (e.g.
 #                          470) may lack one or more. Passing an unknown flag
 #                          makes the .run abort with "unrecognized option", so
-#                          we only pass flags the installer advertises.
+#                          every flag beyond the essential set below is gated on
+#                          the installer advertising it in --help.
 #
-# Flags every supported .run understands (--silent, --kernel-source-path,
-# --kernel-name, --no-x-check, --no-nouveau-check, --no-backup,
-# --skip-module-load, --no-rebuild-initramfs) are passed unconditionally.
+# Only --silent, --kernel-source-path and --kernel-name are passed
+# unconditionally: they exist on every supported .run and the cross-compile
+# cannot proceed without them. Everything else is best-effort and dropped (with
+# a warning) when the installer doesn't advertise it.
 #
 # Echoes the flag list, one per line. Reads RUN_FILE, NVIDIA_VERSION, and the
 # (already-normalized) NVIDIA_KERNEL_MODULE_TYPE from caller scope. It does NOT
@@ -180,16 +188,11 @@ select_installer_flags() {
     help="$("./${RUN_FILE}" --help 2>&1 || true)"
     major="${NVIDIA_VERSION%%.*}"
 
-    # Always-safe base set.
+    # Essential flags every supported .run understands.
     printf '%s\n' \
         --silent \
         --kernel-source-path="$KERNEL_HEADERS_PATH" \
-        --kernel-name="$KERNEL_VERSION" \
-        --no-rebuild-initramfs \
-        --skip-module-load \
-        --no-x-check \
-        --no-nouveau-check \
-        --no-backup
+        --kernel-name="$KERNEL_VERSION"
 
     # Kernel-module flavor: only on 515+ installers that advertise it.
     if [ "$major" -ge 515 ] 2>/dev/null && printf '%s' "$help" | grep -q -- '--kernel-module-type'; then
@@ -198,7 +201,10 @@ select_installer_flags() {
 
     # Version-fragile flags: pass only if advertised.
     local flag
-    for flag in --no-systemd --no-drm --install-libglvnd --allow-installation-with-running-driver; do
+    for flag in \
+        --no-rebuild-initramfs --skip-module-load --no-x-check \
+        --no-nouveau-check --no-backup --no-systemd --no-drm \
+        --install-libglvnd --allow-installation-with-running-driver; do
         if printf '%s' "$help" | grep -q -- "$flag"; then
             printf '%s\n' "$flag"
         else
