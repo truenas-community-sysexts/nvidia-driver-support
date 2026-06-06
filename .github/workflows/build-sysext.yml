@@ -61,16 +61,24 @@ jobs:
               entries = [{"label": ov, "nvidia": ov,
                           "kmod": os.environ.get("OV_KMOD") or "open"}]
           else:
-              # Smoke a representative spread: the newest open driver (600
-              # series), the 580 branch in both open (Turing+) and proprietary
-              # (Maxwell/Pascal/Volta) flavors, and the 470 branch (Kepler),
-              # which only compiles against modern kernels with the vendored
-              # nvidia-470xx-linux-mainline patches.
+              # Smoke every distinct open driver "train" we track — the newest
+              # point release per major in open_latest (e.g. 610, 595, 590) —
+              # plus the 580 branch in both open (Turing+) and proprietary
+              # (Maxwell/Pascal/Volta) flavors and the patched 470 branch
+              # (Kepler). open_latest is newest-first, so the first-seen major
+              # is the latest feature branch.
+              open_trains = {}
+              for v in cat["open_latest"]:
+                  open_trains.setdefault(v.split(".")[0], v)
               entries = [
-                  {"label": "latest-open", "nvidia": cat["open_latest"][0], "kmod": "open"},
-                  {"label": "open-580",    "nvidia": branch_version("legacy-580"), "kmod": "open"},
-                  {"label": "legacy-580",  "nvidia": branch_version("legacy-580"), "kmod": "proprietary"},
-                  {"label": "legacy-470",  "nvidia": branch_version("legacy-470"), "kmod": "proprietary"},
+                  {"label": "latest-open" if i == 0 else f"open-{m}",
+                   "nvidia": v, "kmod": "open"}
+                  for i, (m, v) in enumerate(open_trains.items())
+              ]
+              entries += [
+                  {"label": "open-580",   "nvidia": branch_version("legacy-580"), "kmod": "open"},
+                  {"label": "legacy-580", "nvidia": branch_version("legacy-580"), "kmod": "proprietary"},
+                  {"label": "legacy-470", "nvidia": branch_version("legacy-470"), "kmod": "proprietary"},
               ]
           print("matrix=" + json.dumps({"include": entries}))
           print("truenas=" + truenas)
