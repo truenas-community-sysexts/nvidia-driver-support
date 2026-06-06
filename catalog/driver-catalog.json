@@ -1,13 +1,13 @@
 {
-  "_comment": "Driver catalog for nvidia-driver-support. The picker in install-nvidia-driver.sh reads this. `open_latest` is the newest N open-capable production drivers (newest first); `branches` pins one version per legacy series; `chip_map` maps an NVIDIA chip prefix (from lspci, e.g. GP107 -> GP) to a recommended branch. This file is regenerated daily by .github/workflows/check-drivers.yml \u2014 hand-edits to open_latest/branches[].version will be overwritten. Seed values below are all real, shipping driver versions.",
+  "_comment": "Driver catalog for nvidia-driver-support. The picker in install-nvidia-driver.sh reads this. `open_latest` is the newest open-capable driver per distinct major/train (newest first), capped at open_latest_count \u2014 deduping by major keeps whole trains from being evicted when one branch ships several point releases. Users can still install any version via --driver=X.Y.Z. `branches` pins one version per legacy series; `chip_map` maps an NVIDIA chip prefix (from lspci, e.g. GP107 -> GP) to a recommended branch. This file is regenerated daily by .github/workflows/check-drivers.yml \u2014 hand-edits to open_latest/branches[].version will be overwritten. Seed values below are all real, shipping driver versions.",
   "schema_version": 1,
   "open_latest_count": 5,
   "open_latest": [
     "610.43.02",
-    "595.71.05",
-    "595.58.03",
-    "595.45.04",
-    "590.48.01"
+    "595.80",
+    "590.48.01",
+    "580.159.04",
+    "575.64.05"
   ],
   "branches": {
     "latest": {

@@ -4,8 +4,10 @@
 Scrapes the autoindex at https://us.download.nvidia.com/XFree86/Linux-x86_64/
 for version directories (X.Y.Z), then:
 
-  * open_latest  = the newest `open_latest_count` open-capable (>= 515)
-                   production driver versions, newest first.
+  * open_latest  = the newest open-capable (>= 515) driver per distinct major
+                   ("train"), newest first, capped at `open_latest_count`.
+                   Deduping by major keeps whole trains from being evicted when
+                   one branch ships several point releases.
   * branches[legacy-*].version = the highest X.Y.Z found whose major matches
                    that branch's series (470/580/390/340). NVIDIA still ships
                    occasional security updates to legacy branches, so we track
@@ -68,10 +70,17 @@ def main():
 
     versions.sort(key=vkey, reverse=True)
 
-    # open_latest: newest N with major >= 515.
+    # open_latest: newest open-capable (>= 515) driver per distinct major
+    # ("train"), newest-first, capped at N. Deduping by major stops one branch's
+    # point releases (e.g. four 595.x) from crowding whole trains (590, 580, ...)
+    # off the list — `versions` is already sorted newest-first, so the first
+    # version seen for a major is that train's newest.
     n = cat.get("open_latest_count", 5)
-    open_caps = [v for v in versions if vkey(v)[0] >= 515]
-    new_open_latest = open_caps[:n]
+    open_trains = {}
+    for v in versions:
+        if vkey(v)[0] >= 515:
+            open_trains.setdefault(vkey(v)[0], v)
+    new_open_latest = list(open_trains.values())[:n]
 
     # legacy branch pins: newest version matching the branch major.
     new_branches = json.loads(json.dumps(cat.get("branches", {})))

@@ -61,25 +61,28 @@ jobs:
               entries = [{"label": ov, "nvidia": ov,
                           "kmod": os.environ.get("OV_KMOD") or "open"}]
           else:
-              # Smoke every distinct open driver "train" we track — the newest
-              # point release per major in open_latest (e.g. 610, 595, 590) —
-              # plus the 580 branch in both open (Turing+) and proprietary
-              # (Maxwell/Pascal/Volta) flavors and the patched 470 branch
-              # (Kepler). open_latest is newest-first, so the first-seen major
-              # is the latest feature branch.
+              # Smoke the newest open driver "trains" in BOTH module flavors,
+              # plus the legacy split. Modern drivers ship open and proprietary
+              # modules from distinct sources, so build each of the newest 3
+              # open trains (newest release per major in open_latest, e.g.
+              # 610/595/590) and the 580 branch as both open (Turing+) and
+              # proprietary (Maxwell/Pascal/Volta). 470 (Kepler) is
+              # proprietary-only, built from the vendored patch set. Older
+              # trains stay user-installable via --driver=X.Y.Z; they just
+              # aren't smoke-built here.
               open_trains = {}
-              for v in cat["open_latest"]:
+              for v in cat["open_latest"]:        # newest-first
                   open_trains.setdefault(v.split(".")[0], v)
-              entries = [
-                  {"label": "latest-open" if i == 0 else f"open-{m}",
-                   "nvidia": v, "kmod": "open"}
-                  for i, (m, v) in enumerate(open_trains.items())
-              ]
-              entries += [
-                  {"label": "open-580",   "nvidia": branch_version("legacy-580"), "kmod": "open"},
-                  {"label": "legacy-580", "nvidia": branch_version("legacy-580"), "kmod": "proprietary"},
-                  {"label": "legacy-470", "nvidia": branch_version("legacy-470"), "kmod": "proprietary"},
-              ]
+              modern = list(open_trains.values())[:3]
+              s580 = branch_version("legacy-580")
+              if s580 not in modern:
+                  modern.append(s580)
+              entries = []
+              for v in modern:
+                  m = v.split(".")[0]
+                  entries.append({"label": f"open-{m}", "nvidia": v, "kmod": "open"})
+                  entries.append({"label": f"prop-{m}", "nvidia": v, "kmod": "proprietary"})
+              entries.append({"label": "legacy-470", "nvidia": branch_version("legacy-470"), "kmod": "proprietary"})
           print("matrix=" + json.dumps({"include": entries}))
           print("truenas=" + truenas)
           PY
