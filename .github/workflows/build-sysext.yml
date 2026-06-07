@@ -29,6 +29,13 @@ on:
 permissions:
   contents: read
 
+# Cancel an in-progress run when a new commit is pushed to the same ref, so
+# rapid PR iteration doesn't stack overlapping ~9-job builds. Each event type
+# gets its own group (a workflow_dispatch on a branch won't cancel a PR run).
+concurrency:
+  group: build-sysext-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   prepare:
     runs-on: ubuntu-latest
@@ -61,13 +68,28 @@ jobs:
               entries = [{"label": ov, "nvidia": ov,
                           "kmod": os.environ.get("OV_KMOD") or "open"}]
           else:
-              # Smoke the supported branches only (best-effort ones don't
-              # cross-compile against the modern kernel without patches).
-              entries = [
-                  {"label": "latest-open", "nvidia": cat["open_latest"][0], "kmod": "open"},
-                  {"label": "legacy-580",  "nvidia": branch_version("legacy-580"), "kmod": "proprietary"},
-                  {"label": "legacy-470",  "nvidia": branch_version("legacy-470"), "kmod": "proprietary"},
-              ]
+              # Smoke the newest open driver "trains" in BOTH module flavors,
+              # plus the legacy split. Modern drivers ship open and proprietary
+              # modules from distinct sources, so build each of the newest 3
+              # open trains (newest release per major in open_latest, e.g.
+              # 610/595/590) and the 580 branch as both open (Turing+) and
+              # proprietary (Maxwell/Pascal/Volta). 470 (Kepler) is
+              # proprietary-only, built from the vendored patch set. Older
+              # trains stay user-installable via --driver=X.Y.Z; they just
+              # aren't smoke-built here.
+              open_trains = {}
+              for v in cat["open_latest"]:        # newest-first
+                  open_trains.setdefault(v.split(".")[0], v)
+              modern = list(open_trains.values())[:3]
+              s580 = branch_version("legacy-580")
+              if s580 not in modern:
+                  modern.append(s580)
+              entries = []
+              for v in modern:
+                  m = v.split(".")[0]
+                  entries.append({"label": f"open-{m}", "nvidia": v, "kmod": "open"})
+                  entries.append({"label": f"prop-{m}", "nvidia": v, "kmod": "proprietary"})
+              entries.append({"label": "legacy-470", "nvidia": branch_version("legacy-470"), "kmod": "proprietary"})
           print("matrix=" + json.dumps({"include": entries}))
           print("truenas=" + truenas)
           PY
@@ -84,8 +106,17 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     name: build ${{ matrix.label }} (${{ matrix.nvidia }}, ${{ matrix.kmod }})
+    # An entry can opt into continue-on-error with "experimental": True in the
+    # matrix (none currently do) — e.g. a target built from a volatile external
+    # patch set — to stay visible without failing the run. legacy-470 is now a
+    # required build.
+    continue-on-error: ${{ matrix.experimental || false }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          # legacy-470 builds from the nvidia-470xx-linux-mainline patch
+          # submodule under third_party/.
+          submodules: recursive
 
       - name: Install build dependencies
         run: |
@@ -93,7 +124,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential gcc-14 squashfs-tools kmod xz-utils \
             bison flex libelf-dev bc rsync libssl-dev pkg-config \
-            pciutils gnupg ca-certificates wget curl
+            pciutils gnupg ca-certificates wget curl patch
 
       - name: Build nvidia.raw (smoke)
         env:

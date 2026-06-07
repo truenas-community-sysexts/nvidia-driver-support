@@ -157,15 +157,26 @@ write_extension_release() {
 #                          passing it makes the installer abort. We drop it and
 #                          force NVIDIA_KERNEL_MODULE_TYPE=proprietary so the
 #                          rest of the build (modules.dep, staging) is consistent.
+#   --kernel-module-type   only exists on 515+ (the open/proprietary split).
+#   --no-rebuild-initramfs,
+#   --skip-module-load,
+#   --no-x-check,
+#   --no-nouveau-check,
+#   --no-backup,
 #   --no-drm,
 #   --install-libglvnd,
-#   --no-systemd           present on modern installers; older ones may lack one
-#                          or more. We only pass flags the installer advertises.
+#   --no-systemd,
+#   --allow-installation-with-running-driver
+#                          present on modern installers; older branches (e.g.
+#                          470) may lack one or more. Passing an unknown flag
+#                          makes the .run abort with "unrecognized option", so
+#                          every flag beyond the essential set below is gated on
+#                          the installer advertising it in --help.
 #
-# Flags every supported .run understands (--silent, --kernel-source-path,
-# --kernel-name, --no-x-check, --no-nouveau-check, --no-backup,
-# --skip-module-load, --no-rebuild-initramfs, --allow-installation-with-
-# running-driver) are passed unconditionally.
+# Only --silent, --kernel-source-path and --kernel-name are passed
+# unconditionally: they exist on every supported .run and the cross-compile
+# cannot proceed without them. Everything else is best-effort and dropped (with
+# a warning) when the installer doesn't advertise it.
 #
 # Echoes the flag list, one per line. Reads RUN_FILE, NVIDIA_VERSION, and the
 # (already-normalized) NVIDIA_KERNEL_MODULE_TYPE from caller scope. It does NOT
@@ -177,17 +188,11 @@ select_installer_flags() {
     help="$("./${RUN_FILE}" --help 2>&1 || true)"
     major="${NVIDIA_VERSION%%.*}"
 
-    # Always-safe base set.
+    # Essential flags every supported .run understands.
     printf '%s\n' \
         --silent \
         --kernel-source-path="$KERNEL_HEADERS_PATH" \
-        --kernel-name="$KERNEL_VERSION" \
-        --allow-installation-with-running-driver \
-        --no-rebuild-initramfs \
-        --skip-module-load \
-        --no-x-check \
-        --no-nouveau-check \
-        --no-backup
+        --kernel-name="$KERNEL_VERSION"
 
     # Kernel-module flavor: only on 515+ installers that advertise it.
     if [ "$major" -ge 515 ] 2>/dev/null && printf '%s' "$help" | grep -q -- '--kernel-module-type'; then
@@ -196,13 +201,49 @@ select_installer_flags() {
 
     # Version-fragile flags: pass only if advertised.
     local flag
-    for flag in --no-systemd --no-drm --install-libglvnd; do
+    for flag in \
+        --no-rebuild-initramfs --skip-module-load --no-x-check \
+        --no-nouveau-check --no-backup --no-systemd --no-drm \
+        --install-libglvnd --allow-installation-with-running-driver; do
         if printf '%s' "$help" | grep -q -- "$flag"; then
             printf '%s\n' "$flag"
         else
             warn "Installer for $NVIDIA_VERSION does not advertise ${flag}; omitting"
         fi
     done
+}
+
+# The 470 legacy branch (470.256.02 is its final release) is EOL upstream and
+# its kernel-module source does not compile against modern kernels — TrueNAS
+# 25.10 ships 6.12. We patch the extracted driver source with the community
+# nvidia-470xx-linux-mainline set (vendored as a pinned git submodule) before
+# compiling. The patch series targets 470.256.02 specifically and is applied in
+# the exact order from upstream's own extract_and_patch (minus the opt-in
+# staging/ patches), read live from the pinned checkout so a submodule bump
+# stays faithful with no duplicated list here to drift out of sync.
+PATCH_REPO="${REPO_ROOT}/third_party/nvidia-470xx-linux-mainline"
+
+# Echo the ordered, non-staging patch filenames (relative to patches/) that
+# upstream's extract_and_patch applies.
+patch_470xx_series() {
+    grep -E '^[[:space:]]*apply_patch[[:space:]]' "${PATCH_REPO}/extract_and_patch" \
+        | sed -E 's/^[[:space:]]*apply_patch[[:space:]]+//' \
+        | grep -v '^staging/'
+}
+
+# Apply the 470xx patch series to an extracted driver's kernel/ source tree.
+apply_470xx_patches() {
+    local kernel_src="$1" p pinned
+    [ -f "${PATCH_REPO}/extract_and_patch" ] \
+        || die "470 patch set missing at ${PATCH_REPO} — initialize submodules (git submodule update --init)"
+    pinned="$(git -C "$PATCH_REPO" rev-parse --short HEAD 2>/dev/null || echo vendored)"
+    info "Patching 470 source with nvidia-470xx-linux-mainline (${pinned}) ..."
+    while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        info "  apply: $p"
+        patch -d "$kernel_src" -Np1 -i "${PATCH_REPO}/patches/${p}" \
+            || die "Failed to apply 470xx patch: $p"
+    done < <(patch_470xx_series)
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -214,7 +255,7 @@ if [ "$(id -u)" -ne 0 ]; then
     die "Must run as root (kernel-module compile + /usr writes)"
 fi
 
-for cmd in unsquashfs mksquashfs depmod sha256sum wget curl gpg apt-get find rsync; do
+for cmd in unsquashfs mksquashfs depmod sha256sum wget curl gpg apt-get find rsync patch; do
     command -v "$cmd" >/dev/null 2>&1 || die "missing required tool: $cmd"
 done
 
@@ -402,9 +443,27 @@ while IFS= read -r _flag; do
 done < <(select_installer_flags)
 info "Installer flags: ${INSTALLER_FLAGS[*]}"
 
-info "Running NVIDIA installer (silent cross-compile) ..."
-"./${RUN_FILE}" "${INSTALLER_FLAGS[@]}" \
-    || die "NVIDIA installer failed"
+# The 470 branch needs its kernel source patched for modern kernels, so it
+# can't use the .run's one-shot extract+build+install. Extract first, patch the
+# kernel/ tree, then run the unpacked installer against the patched source.
+# Every other branch builds straight from the .run.
+if [ "$DRIVER_MAJOR" = "470" ]; then
+    info "Extracting installer for source patching ..."
+    "./${RUN_FILE}" --extract-only >/dev/null \
+        || die "Failed to extract ${RUN_FILE}"
+    EXTRACT_DIR="${RUN_FILE%.run}"
+    [ -d "$EXTRACT_DIR" ] || EXTRACT_DIR="$(find . -maxdepth 1 -type d -name 'NVIDIA-Linux-*' | head -n1)"
+    [ -n "$EXTRACT_DIR" ] && [ -x "${EXTRACT_DIR}/nvidia-installer" ] \
+        || die "Extracted installer tree not found after --extract-only"
+    apply_470xx_patches "${EXTRACT_DIR}/kernel"
+    info "Running patched NVIDIA installer (silent cross-compile) ..."
+    ( cd "$EXTRACT_DIR" && ./nvidia-installer "${INSTALLER_FLAGS[@]}" ) \
+        || die "NVIDIA installer failed"
+else
+    info "Running NVIDIA installer (silent cross-compile) ..."
+    "./${RUN_FILE}" "${INSTALLER_FLAGS[@]}" \
+        || die "NVIDIA installer failed"
+fi
 ok "NVIDIA driver installed ($NVIDIA_KERNEL_MODULE_TYPE modules)"
 
 info "Taking post-install snapshot ..."
