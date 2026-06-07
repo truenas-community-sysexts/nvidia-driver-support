@@ -96,3 +96,28 @@ drivers, one pinned version per legacy branch, and a chip-prefix → branch map.
 GPU chip prefix, and recommends a branch. The catalog is refreshed daily by
 [`check-drivers.yml`](../.github/workflows/check-drivers.yml) — see
 [driver-catalog.md](driver-catalog.md).
+
+## Releases + cadence
+
+A release is a versioned bundle of the **MIT install tooling + catalog**, tagged
+`v<truenas>-nvidia<driver>-rN`. It deliberately carries **no `nvidia.raw`**: NVIDIA's EULA
+forbids redistributing the proprietary userspace (same reason the MIG repo only publishes its
+open component), so the driver is always assembled on the user's host. The `nvidia` block in
+[`.github/tracked-versions.json`](../.github/tracked-versions.json) pins the recommended
+driver + TrueNAS combo a release was cut for.
+
+- [`release.yml`](../.github/workflows/release.yml) — `resolve` (read tracked-versions / apply
+  dispatch overrides) → `build-nvidia` (build + smoke-test `nvidia.raw` as a **gate** — a broken
+  driver build blocks the release; the artifact is never published) → `publish` (tag a release
+  carrying the scripts + catalog + notes). Auto-builds pass `mark_latest=false` and open a
+  `hardware-test` issue; a maintainer promotes to "Latest" after verifying on real hardware.
+- [`check-releases.yml`](../.github/workflows/check-releases.yml) — daily; watches TrueNAS
+  scale-build tags and NVIDIA `latest.txt` (each gated on the artifact actually being
+  published/mirrored), bumps `tracked-versions.json`, and dispatches `release.yml`. Distinct
+  from `check-drivers.yml`, which refreshes the picker catalog.
+
+`install-nvidia-driver.sh` sources its tooling + catalog from the newest release matching the
+host's TrueNAS version (or `--release=TAG` to pin), falling back to `main` when none matches —
+so installs work before any release exists. An auto-resolved release only affects *sourcing*;
+it never overrides the card-detect driver recommendation. Only an explicit `--release` (with no
+other selector) installs the driver that release pins.

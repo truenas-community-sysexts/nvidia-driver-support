@@ -1,0 +1,354 @@
+name: Check for New Releases
+
+# Daily cadence: watch TrueNAS (scale-build tags) and NVIDIA (latest.txt). When
+# either moves AND the corresponding artifact is actually published, bump
+# .github/tracked-versions.json and dispatch release.yml with mark_latest=false
+# (the new release awaits hardware verification before promotion to "Latest" —
+# see the auto-created `hardware-test` issue).
+#
+# Distinct from check-drivers.yml, which refreshes the picker catalog
+# (catalog/driver-catalog.json: legacy branch pins + open_latest). Both watch
+# the NVIDIA index; this one drives releases, that one drives the picker.
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # Daily at 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+# Serialize manual dispatches against the scheduled run so two concurrent
+# invocations cannot race on the commit/push of tracked-versions.json.
+concurrency:
+  group: check-releases
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        # Default GITHUB_TOKEN is sufficient: main is unprotected on this repo.
+        # If a branch-protection ruleset is later added, swap `token:` to a PAT
+        # secret (e.g. secrets.CHECK_BUILDS) so the bot can push the bump.
+
+      - name: Read tracked versions
+        id: tracked
+        run: |
+          set -o pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          with open('.github/tracked-versions.json') as f:
+              s = json.load(f)
+          print(f"truenas_version={s['truenas']['version']}")
+          print(f"train={s['truenas']['train']}")
+          print(f"nvidia_driver={s['nvidia']['driver']}")
+          print(f"kernel_module_type={s['nvidia']['kernel_module_type']}")
+          PY
+
+      # ─────────────────────────────────────────────────────────────────────
+      # TrueNAS check: latest stable scale-build tag, resolve its train from
+      # the download.truenas.com listing, gate on the .update file actually
+      # being published (tags can land hours/days before the .update).
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Check for new TrueNAS release
+        id: truenas
+        env:
+          CURRENT_VERSION: ${{ steps.tracked.outputs.truenas_version }}
+          CURRENT_TRAIN: ${{ steps.tracked.outputs.train }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          echo "Currently tracked: ${CURRENT_VERSION} on train ${CURRENT_TRAIN}"
+
+          if ! TAGS_JSON=$(curl -fsSL "https://api.github.com/repos/truenas/scale-build/tags?per_page=100" \
+              -H "Authorization: Bearer ${GH_TOKEN}"); then
+            echo "::error title=TrueNAS check::failed to fetch scale-build tags"
+            exit 1
+          fi
+
+          # Stable tags are TS- followed by a purely-numeric dotted version
+          # (e.g. TS-25.10.3.1). Any non-numeric suffix (BETA/RC/...) is excluded.
+          LATEST_TAG=$(printf '%s' "$TAGS_JSON" | python3 -c "
+          import sys, json, re
+          tags = json.load(sys.stdin)
+          stable_re = re.compile(r'^TS-(\d+(?:\.\d+)+)$')
+          stable = [(m.group(1), t['name']) for t in tags
+                    if (m := stable_re.match(t['name']))]
+          if not stable:
+              sys.exit(0)
+          stable.sort(key=lambda v: [int(p) for p in v[0].split('.')])
+          print(stable[-1][1])
+          ")
+
+          if [ -z "$LATEST_TAG" ]; then
+            echo "::error title=TrueNAS check::no stable tags found in scale-build (parser likely broken)"
+            exit 1
+          fi
+
+          LATEST_VERSION="${LATEST_TAG#TS-}"
+          echo "Latest scale-build tag: ${LATEST_TAG} (version: ${LATEST_VERSION})"
+
+          if [ "$LATEST_VERSION" = "$CURRENT_VERSION" ]; then
+            echo "No new TrueNAS release"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Defense against tag deletions / numeric regressions.
+          HIGHER=$(printf '%s\n%s\n' "$CURRENT_VERSION" "$LATEST_VERSION" | python3 -c "
+          import sys
+          versions = [line.strip() for line in sys.stdin if line.strip()]
+          versions.sort(key=lambda v: [int(p) for p in v.split('.')])
+          print(versions[-1])
+          ")
+          if [ "$HIGHER" != "$LATEST_VERSION" ]; then
+            echo "Latest tag ${LATEST_VERSION} is not higher than tracked ${CURRENT_VERSION} — ignoring"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Resolve train name from the download.truenas.com listing.
+          if ! LISTING=$(curl -fsSL "https://download.truenas.com/"); then
+            echo "::error title=TrueNAS check::failed to fetch download.truenas.com listing"
+            exit 1
+          fi
+
+          TRAIN_COUNT=$(printf '%s' "$LISTING" | python3 -c "
+          import sys, re
+          trains = sorted(set(re.findall(r'TrueNAS-SCALE-([A-Z][a-zA-Z]+)/', sys.stdin.read())))
+          print(len(trains))
+          ")
+          if [ "$TRAIN_COUNT" -lt 3 ]; then
+            echo "::error title=TrueNAS check::download.truenas.com listing has only ${TRAIN_COUNT} train references — looks broken or rate-limited"
+            exit 1
+          fi
+
+          MATCHED_TRAINS=$(printf '%s' "$LISTING" | LATEST_VERSION="$LATEST_VERSION" python3 -c "
+          import sys, os, re
+          version = os.environ['LATEST_VERSION']
+          listing = sys.stdin.read()
+          pattern = re.compile(r'TrueNAS-SCALE-([A-Z][a-zA-Z]+)/' + re.escape(version) + r'/')
+          for t in sorted(set(pattern.findall(listing))):
+              print(t)
+          ")
+
+          NUM_MATCHES=$(printf '%s' "$MATCHED_TRAINS" | python3 -c "
+          import sys
+          print(sum(1 for line in sys.stdin if line.strip()))
+          ")
+
+          if [ "$NUM_MATCHES" -eq 0 ]; then
+            echo "Tag ${LATEST_VERSION} found in scale-build, but not yet listed on download.truenas.com under any train. Will retry on next scheduled run."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$NUM_MATCHES" -gt 1 ]; then
+            echo "::error title=TrueNAS check::version ${LATEST_VERSION} appears under multiple trains — refusing to guess"
+            echo "Matched trains:" >&2
+            printf '%s' "$MATCHED_TRAINS" | sed 's/^/  /' >&2
+            exit 1
+          fi
+
+          NEW_TRAIN=$(printf '%s' "$MATCHED_TRAINS" | python3 -c "
+          import sys
+          for line in sys.stdin:
+              s = line.strip()
+              if s:
+                  print(s)
+                  break
+          ")
+          echo "Resolved train for ${LATEST_VERSION}: ${NEW_TRAIN}"
+
+          # .update gate: HEAD-check the actual URL the build script downloads.
+          # Pattern matches build-nvidia-sysext.sh's build_update_url:
+          # 25.x → TrueNAS-SCALE-<version>.update; 26.x → TrueNAS-<version>.update.
+          case "$LATEST_VERSION" in
+            26.*) UPDATE_FILE="TrueNAS-${LATEST_VERSION}.update" ;;
+            *)    UPDATE_FILE="TrueNAS-SCALE-${LATEST_VERSION}.update" ;;
+          esac
+          UPDATE_URL="https://download.truenas.com/TrueNAS-SCALE-${NEW_TRAIN}/${LATEST_VERSION}/${UPDATE_FILE}"
+          if ! curl -fsI "$UPDATE_URL" >/dev/null 2>&1; then
+            echo ".update file not yet published at ${UPDATE_URL}. Will retry on next scheduled run."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$NEW_TRAIN" != "$CURRENT_TRAIN" ]; then
+            echo "::notice title=TrueNAS train rollover::train moved from ${CURRENT_TRAIN} to ${NEW_TRAIN} (version ${LATEST_VERSION})"
+          fi
+
+          echo "New TrueNAS release detected, train resolved, .update is published."
+          {
+            echo "changed=true"
+            echo "version=${LATEST_VERSION}"
+            echo "train=${NEW_TRAIN}"
+          } >> "$GITHUB_OUTPUT"
+
+      # ─────────────────────────────────────────────────────────────────────
+      # NVIDIA driver check: nvidia.com's machine-readable pointer (latest.txt),
+      # one line: "<version> <run-file-path>". We follow "latest" verbatim
+      # (no branch cap), matching the mig repo's policy.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Check for new NVIDIA driver release
+        id: nvidia
+        env:
+          CURRENT_DRIVER: ${{ steps.tracked.outputs.nvidia_driver }}
+        run: |
+          set -o pipefail
+          echo "Currently tracked NVIDIA driver: ${CURRENT_DRIVER}"
+
+          if ! LATEST_LINE=$(curl -fsSL "https://download.nvidia.com/XFree86/Linux-x86_64/latest.txt"); then
+            echo "::error title=NVIDIA check::failed to fetch latest.txt from download.nvidia.com"
+            exit 1
+          fi
+
+          LATEST_VERSION=$(printf '%s' "$LATEST_LINE" | awk '{print $1}')
+          if [ -z "$LATEST_VERSION" ] || ! printf '%s' "$LATEST_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error title=NVIDIA check::unparseable latest.txt content: '${LATEST_LINE}'"
+            exit 1
+          fi
+          echo "NVIDIA latest.txt: ${LATEST_VERSION}"
+
+          if [ "$LATEST_VERSION" = "$CURRENT_DRIVER" ]; then
+            echo "No new NVIDIA driver"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Defense against regressions / weird tag updates.
+          HIGHER=$(printf '%s\n%s\n' "$CURRENT_DRIVER" "$LATEST_VERSION" \
+            | sort -V | tail -n1)
+          if [ "$HIGHER" != "$LATEST_VERSION" ]; then
+            echo "latest.txt advertises ${LATEST_VERSION} but tracked ${CURRENT_DRIVER} is higher — ignoring"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Verify the .run file is actually downloadable (latest.txt can be
+          # updated before the file finishes mirroring).
+          RUN_URL="https://us.download.nvidia.com/XFree86/Linux-x86_64/${LATEST_VERSION}/NVIDIA-Linux-x86_64-${LATEST_VERSION}-no-compat32.run"
+          if ! curl -fsI "$RUN_URL" >/dev/null 2>&1; then
+            echo ".run file not yet mirrored at ${RUN_URL}. Will retry on next scheduled run."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "New NVIDIA driver detected, .run file is mirrored."
+          {
+            echo "changed=true"
+            echo "driver=${LATEST_VERSION}"
+          } >> "$GITHUB_OUTPUT"
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Single commit covering whichever fields actually moved.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Update tracked-versions
+        id: write
+        if: steps.truenas.outputs.changed == 'true' || steps.nvidia.outputs.changed == 'true'
+        env:
+          TRUENAS_CHANGED: ${{ steps.truenas.outputs.changed }}
+          NEW_TRUENAS_VERSION: ${{ steps.truenas.outputs.version }}
+          NEW_TRAIN: ${{ steps.truenas.outputs.train }}
+          NVIDIA_CHANGED: ${{ steps.nvidia.outputs.changed }}
+          NEW_NVIDIA_DRIVER: ${{ steps.nvidia.outputs.driver }}
+          CURRENT_TRUENAS_VERSION: ${{ steps.tracked.outputs.truenas_version }}
+          CURRENT_TRAIN: ${{ steps.tracked.outputs.train }}
+          CURRENT_NVIDIA_DRIVER: ${{ steps.tracked.outputs.nvidia_driver }}
+          CURRENT_KMOD_TYPE: ${{ steps.tracked.outputs.kernel_module_type }}
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json, os
+          with open('.github/tracked-versions.json') as f:
+              s = json.load(f)
+          if os.environ['TRUENAS_CHANGED'] == 'true':
+              s['truenas']['version'] = os.environ['NEW_TRUENAS_VERSION']
+              s['truenas']['train']   = os.environ['NEW_TRAIN']
+          if os.environ['NVIDIA_CHANGED'] == 'true':
+              s['nvidia']['driver']   = os.environ['NEW_NVIDIA_DRIVER']
+          with open('.github/tracked-versions.json', 'w') as f:
+              json.dump(s, f, indent=2)
+              f.write('\n')
+          PY
+
+          # Post-update values for the downstream dispatch.
+          if [ "$TRUENAS_CHANGED" = "true" ]; then
+            FINAL_TRUENAS_VERSION="$NEW_TRUENAS_VERSION"
+            FINAL_TRAIN="$NEW_TRAIN"
+          else
+            FINAL_TRUENAS_VERSION="$CURRENT_TRUENAS_VERSION"
+            FINAL_TRAIN="$CURRENT_TRAIN"
+          fi
+          if [ "$NVIDIA_CHANGED" = "true" ]; then
+            FINAL_NVIDIA_DRIVER="$NEW_NVIDIA_DRIVER"
+          else
+            FINAL_NVIDIA_DRIVER="$CURRENT_NVIDIA_DRIVER"
+          fi
+
+          # Self-explanatory commit message.
+          if [ "$TRUENAS_CHANGED" = "true" ] && [ "$NVIDIA_CHANGED" = "true" ]; then
+            if [ "$NEW_TRAIN" != "$CURRENT_TRAIN" ]; then
+              MSG="Update tracked versions: TrueNAS ${NEW_TRUENAS_VERSION} (train: ${NEW_TRAIN}), NVIDIA ${NEW_NVIDIA_DRIVER}"
+            else
+              MSG="Update tracked versions: TrueNAS ${NEW_TRUENAS_VERSION}, NVIDIA ${NEW_NVIDIA_DRIVER}"
+            fi
+          elif [ "$TRUENAS_CHANGED" = "true" ]; then
+            if [ "$NEW_TRAIN" != "$CURRENT_TRAIN" ]; then
+              MSG="Update tracked TrueNAS version to ${NEW_TRUENAS_VERSION} (train: ${NEW_TRAIN})"
+            else
+              MSG="Update tracked TrueNAS version to ${NEW_TRUENAS_VERSION}"
+            fi
+          else
+            MSG="Update tracked NVIDIA driver version to ${NEW_NVIDIA_DRIVER}"
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .github/tracked-versions.json
+          git commit -m "$MSG" || {
+            echo "ERROR: Failed to commit tracked-versions update"
+            exit 1
+          }
+          git push || {
+            echo "ERROR: Failed to push tracked-versions update"
+            exit 1
+          }
+
+          {
+            echo "truenas_version=${FINAL_TRUENAS_VERSION}"
+            echo "train=${FINAL_TRAIN}"
+            echo "nvidia_driver=${FINAL_NVIDIA_DRIVER}"
+            echo "kernel_module_type=${CURRENT_KMOD_TYPE}"
+          } >> "$GITHUB_OUTPUT"
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Trigger the release. mark_latest='false' → produces a release but does
+      # not promote it to "Latest"; promotion waits on a successful hardware
+      # test (see the auto-created `hardware-test` issue on the new release).
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Trigger Release
+        if: steps.truenas.outputs.changed == 'true' || steps.nvidia.outputs.changed == 'true'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'release.yml',
+              ref: 'main',
+              inputs: {
+                truenas_version:    '${{ steps.write.outputs.truenas_version }}',
+                train_name:         '${{ steps.write.outputs.train }}',
+                nvidia_version:     '${{ steps.write.outputs.nvidia_driver }}',
+                kernel_module_type: '${{ steps.write.outputs.kernel_module_type }}',
+                mark_latest:        'false'
+              }
+            });
+            console.log('Dispatched release.yml: TrueNAS ${{ steps.write.outputs.truenas_version }} (${{ steps.write.outputs.train }}), NVIDIA ${{ steps.write.outputs.nvidia_driver }} (${{ steps.write.outputs.kernel_module_type }})');

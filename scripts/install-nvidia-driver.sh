@@ -40,6 +40,12 @@
 #   --driver=X.Y.Z        an exact NVIDIA driver version (need not be in the catalog)
 #   --custom-run=PATH     a local NVIDIA .run installer (patched/vGPU/etc). Filename
 #                         must be NVIDIA-Linux-x86_64-<X.Y.Z>-no-compat32.run
+#   --release=TAG         pin a published release: source the install tooling +
+#                         catalog from that release's assets (not main), and —
+#                         if no driver selector is given — install the driver it
+#                         pins. TAG form: v<truenas>-nvidia<driver>-rN. With no
+#                         --release, the newest release matching this host's
+#                         TrueNAS is used for tooling (falling back to main).
 #   --kmod=open|proprietary
 #                         kernel-module flavor. Auto-derived from the branch/version
 #                         if omitted (open for Turing+, proprietary for legacy).
@@ -74,6 +80,9 @@ DRIVER_VER=""
 CUSTOM_RUN=""
 KMOD_TYPE=""          # empty = auto-derive
 DRIVER_SRC=""
+RELEASE_TAG=""        # --release=TAG; empty = auto-resolve newest for this TrueNAS
+RESOLVED_TAG=""       # set by resolve_release_for_install (release used for sourcing)
+RELEASE_DL_BASE=""    # release asset download base URL when a release is in use
 REBUILD=false
 LIST_MODE=false
 CATALOG_PATH=""
@@ -90,6 +99,7 @@ for arg in "$@"; do
         --branch=*) BRANCH="${arg#*=}" ;;
         --driver=*) DRIVER_VER="${arg#*=}" ;;
         --custom-run=*) CUSTOM_RUN="${arg#*=}" ;;
+        --release=*) RELEASE_TAG="${arg#*=}" ;;
         --kmod=*) KMOD_TYPE="${arg#*=}" ;;
         --driver-sysext=*) DRIVER_SRC="${arg#*=}" ;;
         --rebuild) REBUILD=true ;;
@@ -102,7 +112,7 @@ for arg in "$@"; do
         --force) FORCE=true ;;
         --check) CHECK_MODE=true ;;
         --dry-run) DRY_RUN=true ;;
-        -h|--help) sed -n '2,77p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"; exit 0 ;;
         *) echo "Unknown arg: $arg" >&2; exit 2 ;;
     esac
 done
@@ -184,6 +194,72 @@ resolve_truenas_codename() {
     esac
 }
 
+# Parse driver / TrueNAS version out of a release tag.
+# Format: v25.10.3.1-nvidia610.43.02-r5  →  610.43.02 / 25.10.3.1
+parse_nvidia_version_from_tag() {
+    printf '%s\n' "$1" | sed -nE 's/^v[0-9.]+-nvidia([0-9]+\.[0-9]+\.[0-9]+)-r[0-9]+$/\1/p'
+}
+parse_truenas_version_from_tag() {
+    printf '%s\n' "$1" | sed -nE 's/^v([0-9.]+)-nvidia[0-9]+\.[0-9]+\.[0-9]+-r[0-9]+$/\1/p'
+}
+
+# Newest release tag matching `v<truenas>-nvidia*` for the given TrueNAS
+# version. Echoes the tag, or nothing on no-match / API error (caller treats
+# "nothing" as "use main").
+release_tag_for_truenas() {
+    PREFIX="v${1}-nvidia" curl -sS --max-time 30 \
+        "https://api.github.com/repos/${REPO}/releases?per_page=100" 2>/dev/null \
+        | python3 -c "
+import sys, json, os
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if not isinstance(data, list):
+    sys.exit(0)
+pre = os.environ['PREFIX']
+m = [r for r in data if r.get('tag_name', '').startswith(pre)]
+if not m:
+    sys.exit(0)
+m.sort(key=lambda r: r.get('published_at') or r.get('created_at') or '', reverse=True)
+print(m[0]['tag_name'], end='')
+" 2>/dev/null || true
+}
+
+# Decide which release (if any) supplies the install tooling + catalog. Sets
+# globals RESOLVED_TAG and RELEASE_DL_BASE. Explicit --release is trusted
+# verbatim; otherwise best-effort auto-resolve the newest release for the
+# detected TrueNAS. A full local checkout needs no release (helpers are local).
+resolve_release_for_install() {
+    if [ -n "$RELEASE_TAG" ]; then
+        RESOLVED_TAG="$RELEASE_TAG"
+    elif [ -n "${SCRIPT_DIR:-}" ] && [ -f "${SCRIPT_DIR}/build-nvidia-sysext.sh" ]; then
+        return 0
+    else
+        local tn tag
+        tn=$(detect_truenas_version 2>/dev/null) || tn=""
+        [ -n "$tn" ] || return 0
+        tag=$(release_tag_for_truenas "$tn")
+        [ -n "$tag" ] || { echo "No published release matches TrueNAS ${tn}; using install tooling from main." >&2; return 0; }
+        RESOLVED_TAG="$tag"
+    fi
+    RELEASE_DL_BASE="https://github.com/${REPO}/releases/download/${RESOLVED_TAG}"
+    echo "Release: ${RESOLVED_TAG} (sourcing install tooling + catalog from its assets)" >&2
+}
+
+# Download a repo file, preferring the resolved release's (flat) assets —
+# version-pinned — and falling back to main. $1=asset basename,
+# $2=path-under-repo for the main fallback, $3=dest.
+fetch_repo_file() {
+    local asset="$1" main_rel="$2" dest="$3"
+    if [ -n "$RELEASE_DL_BASE" ] \
+        && curl -fL --retry 3 -o "$dest" "${RELEASE_DL_BASE}/${asset}" 2>/dev/null; then
+        return 0
+    fi
+    [ -z "$RELEASE_DL_BASE" ] || echo "WARN: '${asset}' not in release ${RESOLVED_TAG}; falling back to main" >&2
+    curl -fL --retry 3 -o "$dest" "${RAW_BASE}/${main_rel}"
+}
+
 # Driver version out of NVIDIA-Linux-x86_64-<VER>-no-compat32.run.
 # VER is X.Y.Z (modern) or X.Y (older legacy, e.g. 390.157).
 parse_nvidia_version_from_run_file() {
@@ -232,8 +308,15 @@ load_catalog() {
         candidate="${SCRIPT_DIR}/../catalog/driver-catalog.json"
         CATALOG_JSON=$(cat "$candidate")
     else
-        CATALOG_JSON=$(curl -fsSL --retry 3 --max-time 30 "${RAW_BASE}/catalog/driver-catalog.json") \
-            || { echo "ERROR: could not fetch driver catalog from ${RAW_BASE}/catalog/driver-catalog.json" >&2; exit 1; }
+        # Prefer the resolved release's pinned catalog; fall back to main.
+        CATALOG_JSON=""
+        if [ -n "$RELEASE_DL_BASE" ]; then
+            CATALOG_JSON=$(curl -fsSL --retry 3 --max-time 30 "${RELEASE_DL_BASE}/driver-catalog.json" 2>/dev/null) || CATALOG_JSON=""
+        fi
+        if [ -z "$CATALOG_JSON" ]; then
+            CATALOG_JSON=$(curl -fsSL --retry 3 --max-time 30 "${RAW_BASE}/catalog/driver-catalog.json") \
+                || { echo "ERROR: could not fetch driver catalog from ${RAW_BASE}/catalog/driver-catalog.json" >&2; exit 1; }
+        fi
     fi
     # Validate it parses.
     printf '%s' "$CATALOG_JSON" | python3 -c 'import sys,json; json.load(sys.stdin)' 2>/dev/null \
@@ -431,9 +514,9 @@ stage_build_helpers() {
             if_real cp "${SCRIPT_DIR}/${f}" "${stage_dir}/${f}"
         else
             if $DRY_RUN; then
-                echo "[dry-run] would: curl -fL -o ${stage_dir}/${f} ${RAW_BASE}/scripts/${f}" >&2
+                echo "[dry-run] would: fetch ${f} (release ${RESOLVED_TAG:-<none>} → main) to ${stage_dir}/${f}" >&2
             else
-                curl -fL --retry 3 -o "${stage_dir}/${f}" "${RAW_BASE}/scripts/${f}" \
+                fetch_repo_file "${f}" "scripts/${f}" "${stage_dir}/${f}" \
                     || { echo "ERROR: failed to download helper: $f" >&2; return 1; }
             fi
         fi
@@ -603,6 +686,19 @@ fi
 # ─────────────────────────────────────────────────────────────────────────
 TARGET_NV_VER=""
 SELECTED_BRANCH=""
+
+# Decide which release supplies the tooling + catalog (sets RESOLVED_TAG /
+# RELEASE_DL_BASE). An explicit --release with no other driver selector also
+# pins the driver to the one that release was cut for. An auto-resolved release
+# only affects sourcing — it never overrides the card-detect recommendation,
+# which matters here: this repo spans card generations, so "latest release"
+# must not hand a legacy-card user a modern driver.
+resolve_release_for_install
+if [ -n "$RELEASE_TAG" ] && [ -z "$DRIVER_SRC" ] && [ -z "$CUSTOM_RUN" ] \
+   && [ -z "$DRIVER_VER" ] && [ -z "$BRANCH" ] && [ -n "$RESOLVED_TAG" ]; then
+    DRIVER_VER="$(parse_nvidia_version_from_tag "$RESOLVED_TAG")"
+    [ -n "$DRIVER_VER" ] && echo "Release ${RESOLVED_TAG} pins driver ${DRIVER_VER}"
+fi
 
 if [ -z "$DRIVER_SRC" ]; then
     load_catalog
@@ -852,8 +948,8 @@ if [ -n "${SCRIPT_DIR:-}" ] && [ -f "${SCRIPT_DIR}/nvidia-preinit-driver.sh" ]; 
     cp "${SCRIPT_DIR}/nvidia-preinit-driver.sh" "$PREINIT_STAGE"
     echo "Staged PREINIT helper from local checkout"
 else
-    echo "Downloading PREINIT helper from ${RAW_BASE}/scripts/nvidia-preinit-driver.sh"
-    curl -fL --retry 3 -o "$PREINIT_STAGE" "${RAW_BASE}/scripts/nvidia-preinit-driver.sh" \
+    echo "Staging PREINIT helper (release ${RESOLVED_TAG:-<none>} → main)"
+    fetch_repo_file "nvidia-preinit-driver.sh" "scripts/nvidia-preinit-driver.sh" "$PREINIT_STAGE" \
         || { echo "ERROR: failed to download PREINIT helper — aborting BEFORE system changes" >&2; exit 1; }
 fi
 if $DRY_RUN; then
