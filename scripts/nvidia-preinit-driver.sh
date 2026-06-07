@@ -116,9 +116,9 @@ fi
 # nvidia.ko is built against a specific kernel. After a TrueNAS update
 # bumps the kernel, our bundled module silently won't load and the user
 # is left with "nvidia-smi: NVIDIA-SMI couldn't find any device" with no
-# obvious cause. Surface the mismatch with a clear pointer at the release
-# page so the user knows what's needed (a new sysext built for the new
-# kernel — coming from check-releases auto-bumps).
+# obvious cause. Surface the mismatch with a clear pointer to rebuild the
+# sysext for the new kernel (re-run the install one-liner, or the staged
+# build-on-host.sh with --rebuild) — the build is always done on-host.
 #
 # Module loading is normally driven by udev when the GPU PCI device is
 # probed — we don't insmod here. We only verify the file exists for the

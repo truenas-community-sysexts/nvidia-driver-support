@@ -40,12 +40,12 @@
 #   --driver=X.Y.Z        an exact NVIDIA driver version (need not be in the catalog)
 #   --custom-run=PATH     a local NVIDIA .run installer (patched/vGPU/etc). Filename
 #                         must be NVIDIA-Linux-x86_64-<X.Y.Z>-no-compat32.run
-#   --release=TAG         pin a published release: source the install tooling +
-#                         catalog from that release's assets (not main), and —
-#                         if no driver selector is given — install the driver it
-#                         pins. TAG form: v<truenas>-nvidia<driver>-rN. With no
-#                         --release, the newest release matching this host's
-#                         TrueNAS is used for tooling (falling back to main).
+#   --release=TAG         pin a published release (TAG form: v<N>): source the
+#                         install tooling + catalog from that release's assets
+#                         instead of main. Releases are tooling+catalog
+#                         snapshots — they do NOT pin a driver; pick the driver
+#                         with --branch/--driver as usual. With no --release the
+#                         repo's latest release is used (falling back to main).
 #   --kmod=open|proprietary
 #                         kernel-module flavor. Auto-derived from the branch/version
 #                         if omitted (open for Turing+, proprietary for legacy).
@@ -80,7 +80,7 @@ DRIVER_VER=""
 CUSTOM_RUN=""
 KMOD_TYPE=""          # empty = auto-derive
 DRIVER_SRC=""
-RELEASE_TAG=""        # --release=TAG; empty = auto-resolve newest for this TrueNAS
+RELEASE_TAG=""        # --release=TAG (v<N>); empty = auto-resolve repo's latest release
 RESOLVED_TAG=""       # set by resolve_release_for_install (release used for sourcing)
 RELEASE_DL_BASE=""    # release asset download base URL when a release is in use
 REBUILD=false
@@ -194,53 +194,38 @@ resolve_truenas_codename() {
     esac
 }
 
-# Parse driver / TrueNAS version out of a release tag.
-# Format: v25.10.3.1-nvidia610.43.02-r5  →  610.43.02 / 25.10.3.1
-parse_nvidia_version_from_tag() {
-    printf '%s\n' "$1" | sed -nE 's/^v[0-9.]+-nvidia([0-9]+\.[0-9]+\.[0-9]+)-r[0-9]+$/\1/p'
-}
-parse_truenas_version_from_tag() {
-    printf '%s\n' "$1" | sed -nE 's/^v([0-9.]+)-nvidia[0-9]+\.[0-9]+\.[0-9]+-r[0-9]+$/\1/p'
-}
-
-# Newest release tag matching `v<truenas>-nvidia*` for the given TrueNAS
-# version. Echoes the tag, or nothing on no-match / API error (caller treats
+# Newest published release tag for the repo. Releases are tooling+catalog
+# snapshots tagged v<N> (not per-driver/per-TrueNAS), so we just take the
+# latest. Echoes the tag, or nothing on no-release / API error (caller treats
 # "nothing" as "use main").
-release_tag_for_truenas() {
-    PREFIX="v${1}-nvidia" curl -sS --max-time 30 \
-        "https://api.github.com/repos/${REPO}/releases?per_page=100" 2>/dev/null \
+latest_release_tag() {
+    curl -sS --max-time 30 \
+        "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
         | python3 -c "
-import sys, json, os
+import sys, json
 try:
     data = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
-if not isinstance(data, list):
-    sys.exit(0)
-pre = os.environ['PREFIX']
-m = [r for r in data if r.get('tag_name', '').startswith(pre)]
-if not m:
-    sys.exit(0)
-m.sort(key=lambda r: r.get('published_at') or r.get('created_at') or '', reverse=True)
-print(m[0]['tag_name'], end='')
+if isinstance(data, dict) and data.get('tag_name'):
+    print(data['tag_name'], end='')
 " 2>/dev/null || true
 }
 
 # Decide which release (if any) supplies the install tooling + catalog. Sets
 # globals RESOLVED_TAG and RELEASE_DL_BASE. Explicit --release is trusted
-# verbatim; otherwise best-effort auto-resolve the newest release for the
-# detected TrueNAS. A full local checkout needs no release (helpers are local).
+# verbatim; otherwise use the repo's latest release. A full local checkout
+# needs no release (helpers are local). Releases don't pin a driver — this only
+# governs where the scripts + catalog come from.
 resolve_release_for_install() {
     if [ -n "$RELEASE_TAG" ]; then
         RESOLVED_TAG="$RELEASE_TAG"
     elif [ -n "${SCRIPT_DIR:-}" ] && [ -f "${SCRIPT_DIR}/build-nvidia-sysext.sh" ]; then
         return 0
     else
-        local tn tag
-        tn=$(detect_truenas_version 2>/dev/null) || tn=""
-        [ -n "$tn" ] || return 0
-        tag=$(release_tag_for_truenas "$tn")
-        [ -n "$tag" ] || { echo "No published release matches TrueNAS ${tn}; using install tooling from main." >&2; return 0; }
+        local tag
+        tag=$(latest_release_tag)
+        [ -n "$tag" ] || { echo "No published release found; using install tooling from main." >&2; return 0; }
         RESOLVED_TAG="$tag"
     fi
     RELEASE_DL_BASE="https://github.com/${REPO}/releases/download/${RESOLVED_TAG}"
@@ -688,17 +673,10 @@ TARGET_NV_VER=""
 SELECTED_BRANCH=""
 
 # Decide which release supplies the tooling + catalog (sets RESOLVED_TAG /
-# RELEASE_DL_BASE). An explicit --release with no other driver selector also
-# pins the driver to the one that release was cut for. An auto-resolved release
-# only affects sourcing — it never overrides the card-detect recommendation,
-# which matters here: this repo spans card generations, so "latest release"
-# must not hand a legacy-card user a modern driver.
+# RELEASE_DL_BASE). Releases are tooling+catalog snapshots — they don't pin a
+# driver — so this only governs where the scripts + catalog come from; driver
+# selection stays card-detect / --branch / --driver / --custom-run.
 resolve_release_for_install
-if [ -n "$RELEASE_TAG" ] && [ -z "$DRIVER_SRC" ] && [ -z "$CUSTOM_RUN" ] \
-   && [ -z "$DRIVER_VER" ] && [ -z "$BRANCH" ] && [ -n "$RESOLVED_TAG" ]; then
-    DRIVER_VER="$(parse_nvidia_version_from_tag "$RESOLVED_TAG")"
-    [ -n "$DRIVER_VER" ] && echo "Release ${RESOLVED_TAG} pins driver ${DRIVER_VER}"
-fi
 
 if [ -z "$DRIVER_SRC" ]; then
     load_catalog

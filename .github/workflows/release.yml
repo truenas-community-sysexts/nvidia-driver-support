@@ -1,181 +1,86 @@
 name: Release
 
-# Cuts a versioned, user-installable release: tag `v<truenas>-nvidia<driver>-r<run>`.
+# Cuts a versioned, user-installable TOOLING release.
 #
-# What a release carries: the MIT install tooling (install/uninstall/preinit/
-# recover/build scripts) + the driver catalog + release notes. It does NOT
-# carry nvidia.raw — NVIDIA's EULA prohibits us redistributing the proprietary
-# userspace, so the driver is always assembled on the user's own TrueNAS host
-# (see README License section).
+# A release is a snapshot of the MIT install tooling + the driver catalog (the
+# whole supported matrix) — it is NOT tied to a specific driver, kmod, or
+# TrueNAS version, and never carries nvidia.raw (NVIDIA's EULA bars
+# redistributing the proprietary userspace). The install script detects the
+# card and builds the right driver ON THE USER'S HOST, against that host's
+# kernel + TrueNAS version, for whatever the catalog offers — so one release
+# covers the entire driver x kmod x card matrix.
 #
-# Nothing is built here. A release publishes only static repo files, so there's
-# no artifact to gate on a build. Build validation lives in the PR smoke
-# (build-sysext.yml) and, on version bumps, in the smoke that check-releases.yml
-# dispatches for the new combo; the driver itself is always built + verified on
-# the user's host.
-#
-# Triggered manually (workflow_dispatch) or by check-releases.yml when TrueNAS
-# or NVIDIA upstream moves (workflow_call, mark_latest=false → awaits hardware
-# verification before promotion to GitHub "Latest").
+# Tag: `v<run_number>` — an auto-incrementing release counter
+# (github.run_number). Nothing is built here; build validation lives in the PR
+# smoke (build-sysext.yml) and the user's on-host build. Manual dispatch only;
+# always promoted to GitHub "Latest" (every release is a deliberate cut).
 
 on:
   workflow_dispatch:
-    inputs:
-      nvidia_version:
-        description: 'NVIDIA driver version (leave blank for latest tracked)'
-        required: false
-        default: ''
-      truenas_version:
-        description: 'TrueNAS version (leave blank for latest tracked)'
-        required: false
-        default: ''
-      kernel_module_type:
-        description: 'NVIDIA kernel module flavor: open or proprietary (leave blank for latest tracked)'
-        required: false
-        default: ''
-      mark_latest:
-        description: 'Promote this release to GitHub "Latest" (manual dispatches default true; check-releases auto-builds pass false)'
-        required: false
-        type: choice
-        options:
-          - 'true'
-          - 'false'
-        default: 'true'
-
-  workflow_call:
-    inputs:
-      nvidia_version:
-        type: string
-        required: true
-      truenas_version:
-        type: string
-        required: true
-      kernel_module_type:
-        type: string
-        required: true
-      mark_latest:
-        type: string
-        required: false
-        default: 'false'
 
 permissions:
   contents: write
-  issues: write  # required by the auto-create hardware-test issue step (mark_latest=false path)
 
 jobs:
-  # ───────────────────────────────────────────────────────────────────────
-  # resolve — single source of truth for build parameters. tracked-versions
-  # provides defaults; workflow inputs override. Both downstream jobs consume.
-  # ───────────────────────────────────────────────────────────────────────
-  resolve:
-    runs-on: ubuntu-latest
-    outputs:
-      nvidia_version: ${{ steps.params.outputs.nvidia_version }}
-      truenas_version: ${{ steps.params.outputs.truenas_version }}
-      kernel_module_type: ${{ steps.params.outputs.kernel_module_type }}
-      release_tag: ${{ steps.params.outputs.release_tag }}
-      mark_latest: ${{ steps.params.outputs.mark_latest }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-        with:
-          sparse-checkout: |
-            .github/tracked-versions.json
-          sparse-checkout-cone-mode: false
-
-      - name: Resolve build parameters
-        id: params
-        env:
-          INPUT_NVIDIA_VERSION: ${{ inputs.nvidia_version }}
-          INPUT_TRUENAS_VERSION: ${{ inputs.truenas_version }}
-          INPUT_KERNEL_MODULE_TYPE: ${{ inputs.kernel_module_type }}
-          INPUT_MARK_LATEST: ${{ inputs.mark_latest }}
-          RUN_NUMBER: ${{ github.run_number }}
-        run: |
-          set -euo pipefail
-
-          TRACKED=$(python3 -c "
-          import json
-          with open('.github/tracked-versions.json') as f:
-              d = json.load(f)
-          print(d['truenas']['version'])
-          print(d['nvidia']['driver'])
-          print(d['nvidia']['kernel_module_type'])
-          ")
-          TRACKED_TRUENAS=$(sed -n '1p' <<< "$TRACKED")
-          TRACKED_NVIDIA=$(sed -n '2p' <<< "$TRACKED")
-          TRACKED_KMOD=$(sed -n '3p' <<< "$TRACKED")
-
-          NVIDIA_VERSION="${INPUT_NVIDIA_VERSION:-$TRACKED_NVIDIA}"
-          TRUENAS_VERSION="${INPUT_TRUENAS_VERSION:-$TRACKED_TRUENAS}"
-          KERNEL_MODULE_TYPE="${INPUT_KERNEL_MODULE_TYPE:-$TRACKED_KMOD}"
-
-          # Tag policy: every build produces a unique immutable tag.
-          # Format: v<truenas>-nvidia<driver>-r<run_number>
-          RELEASE_TAG="v${TRUENAS_VERSION}-nvidia${NVIDIA_VERSION}-r${RUN_NUMBER}"
-          MARK_LATEST="${INPUT_MARK_LATEST:-true}"
-
-          {
-            echo "nvidia_version=${NVIDIA_VERSION}"
-            echo "truenas_version=${TRUENAS_VERSION}"
-            echo "kernel_module_type=${KERNEL_MODULE_TYPE}"
-            echo "release_tag=${RELEASE_TAG}"
-            echo "mark_latest=${MARK_LATEST}"
-          } >> "$GITHUB_OUTPUT"
-
-          echo "Resolved build parameters:"
-          echo "  NVIDIA:      ${NVIDIA_VERSION} (${KERNEL_MODULE_TYPE})"
-          echo "  TrueNAS:     ${TRUENAS_VERSION}"
-          echo "  Release tag: ${RELEASE_TAG}"
-          echo "  Mark latest: ${MARK_LATEST}"
-
-  # ───────────────────────────────────────────────────────────────────────
-  # publish — tag a release carrying the MIT tooling + catalog + notes.
-  # No nvidia.raw is attached (EULA) and nothing is built: a release is just a
-  # versioned snapshot of static repo files. Build validation lives elsewhere
-  # (PR smoke + check-releases' version-bump smoke + the user's on-host build).
-  # ───────────────────────────────────────────────────────────────────────
   publish:
-    needs: [resolve]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
       - name: Write release notes
         env:
-          NVIDIA_VERSION: ${{ needs.resolve.outputs.nvidia_version }}
-          KERNEL_MODULE_TYPE: ${{ needs.resolve.outputs.kernel_module_type }}
-          TRUENAS_VERSION: ${{ needs.resolve.outputs.truenas_version }}
-          COMMIT_SHA: ${{ github.sha }}
           RUN_NUMBER: ${{ github.run_number }}
-          RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+          COMMIT_SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
         run: |
-          cat > release-notes.md <<EOF
-          Swap TrueNAS's stock NVIDIA driver for a different version (newer for hardware compatibility, or a legacy branch for an older card) as a systemd-sysext. The driver \`nvidia.raw\` is assembled on your own TrueNAS host — we don't redistribute NVIDIA's proprietary userspace — so this release ships the install tooling + driver catalog, not a prebuilt driver.
-
-          The release tag pins the recommended NVIDIA driver + TrueNAS combo this build was tested against. The install script auto-detects your card and recommends a driver; pass \`--release=${RELEASE_TAG}\` to pin this exact tooling + catalog snapshot.
-
-          - TrueNAS:       \`${TRUENAS_VERSION}\`
-          - Pinned driver: \`${NVIDIA_VERSION}\` (${KERNEL_MODULE_TYPE} module)
-          - Run number:    ${RUN_NUMBER}
-          - Source commit: \`${COMMIT_SHA}\`
-
-          Install (detects your card, recommends a driver, builds on-host):
-
-          \`curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install-nvidia-driver.sh | sudo bash\`
-
-          Pin this release's tooling + catalog:
-
-          \`curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install-nvidia-driver.sh | sudo bash -s -- --release=${RELEASE_TAG}\`
-
-          By installing you accept the [NVIDIA Linux Driver License](https://www.nvidia.com/en-us/drivers/nvidia-license/) — the build invokes the official \`.run\` installer with \`--silent\` on your host. **Reboot required** after install.
-          EOF
+          set -euo pipefail
+          # Build the notes from the catalog + CI smoke target so the "supported"
+          # list can't drift from what's actually shipped. Each line is a plain
+          # string literal, so source indentation never leaks into the output.
+          python3 - <<'PY'
+          import json, os
+          cat = json.load(open("catalog/driver-catalog.json"))
+          tracked = json.load(open(".github/tracked-versions.json"))
+          run = os.environ["RUN_NUMBER"]
+          sha = os.environ["COMMIT_SHA"]
+          repo = os.environ["REPO"]
+          br = cat.get("branches", {})
+          def bv(name): return br.get(name, {}).get("version", "?")
+          open_latest = ", ".join(f"`{v}`" for v in cat.get("open_latest", []))
+          tn = tracked["truenas"]["version"]
+          raw = f"https://raw.githubusercontent.com/{repo}/main/scripts/install-nvidia-driver.sh"
+          parts = [
+              "A **tooling + catalog** snapshot for swapping TrueNAS's stock NVIDIA driver. It ships the MIT install scripts + the driver catalog — **not a prebuilt driver** (NVIDIA's EULA bars redistributing the proprietary userspace). The install script detects your card and builds the right driver **on your host**, so this single release covers the whole supported matrix:",
+              "",
+              f"- **Open drivers** (Turing+): {open_latest}",
+              f"- **Legacy branches**: `{bv('legacy-580')}` (Maxwell/Pascal/Volta), `{bv('legacy-470')}` (Kepler) — proprietary; `{bv('legacy-390')}` (Fermi), `{bv('legacy-340')}` (Tesla) — best-effort/patched",
+              f"- **Validated in CI against**: TrueNAS `{tn}`",
+              "",
+              "Open vs proprietary modules are auto-derived per card. The TrueNAS version is **not** pinned — the build adapts to the host's running kernel (25.x / 26.x aware), so this release works across TrueNAS versions; a kernel bump just triggers an on-host rebuild.",
+              "",
+              "Install (detects your card, recommends a driver, builds on-host):",
+              "",
+              f"`curl -fsSL {raw} | sudo bash`",
+              "",
+              "Pin this exact tooling + catalog snapshot:",
+              "",
+              f"`curl -fsSL {raw} | sudo bash -s -- --release=v{run}`",
+              "",
+              f"- Release: `v{run}`",
+              f"- Source commit: `{sha}`",
+              "",
+              "By installing you accept the [NVIDIA Linux Driver License](https://www.nvidia.com/en-us/drivers/nvidia-license/) — the build invokes the official `.run` with `--silent` on your host. **Reboot required** after install.",
+          ]
+          with open("release-notes.md", "w") as f:
+              f.write("\n".join(parts) + "\n")
+          PY
+          echo "=== release-notes.md ==="; cat release-notes.md
 
       - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ needs.resolve.outputs.release_tag }}
-          name: "TrueNAS ${{ needs.resolve.outputs.truenas_version }} - NVIDIA ${{ needs.resolve.outputs.nvidia_version }} (r${{ github.run_number }})"
+          tag_name: v${{ github.run_number }}
+          name: "Tooling + catalog release v${{ github.run_number }}"
           body_path: release-notes.md
           # MIT tooling + catalog only — no nvidia.raw (EULA, see header).
           files: |
@@ -188,78 +93,6 @@ jobs:
             catalog/driver-catalog.json
           draft: false
           prerelease: false
-          make_latest: ${{ needs.resolve.outputs.mark_latest }}
+          make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # ─────────────────────────────────────────────────────────────────────
-      # Auto-builds (mark_latest=false) need hardware verification before
-      # promotion to "Latest". One issue per release tag.
-      # ─────────────────────────────────────────────────────────────────────
-      - name: Create hardware-test issue for auto-build
-        if: needs.resolve.outputs.mark_latest == 'false'
-        uses: actions/github-script@v9
-        env:
-          TAG: ${{ needs.resolve.outputs.release_tag }}
-          TRUENAS_VERSION: ${{ needs.resolve.outputs.truenas_version }}
-          NVIDIA_VERSION: ${{ needs.resolve.outputs.nvidia_version }}
-          KERNEL_MODULE_TYPE: ${{ needs.resolve.outputs.kernel_module_type }}
-        with:
-          script: |
-            const tag = process.env.TAG;
-            const title = `Hardware test: TrueNAS ${process.env.TRUENAS_VERSION} / NVIDIA ${process.env.NVIDIA_VERSION} (${tag})`;
-            const releaseUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/releases/tag/${tag}`;
-
-            try {
-              await github.rest.issues.createLabel({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                name: 'hardware-test',
-                color: 'FBCA04',
-                description: 'Auto-build awaiting hardware verification',
-              });
-            } catch (e) {
-              if (e.status !== 422) throw e;  // 422 = already exists
-            }
-
-            const existing = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              labels: 'hardware-test',
-              per_page: 100,
-            });
-            if (existing.data.some(i => i.title.includes(tag))) {
-              console.log(`Open hardware-test issue already exists for ${tag} — skipping`);
-              return;
-            }
-
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title,
-              labels: ['hardware-test'],
-              body: [
-                `An auto-build published a new release that needs hardware verification before being promoted to **Latest**.`,
-                ``,
-                `**Release:** [${tag}](${releaseUrl})`,
-                `**TrueNAS:** ${process.env.TRUENAS_VERSION}`,
-                `**NVIDIA driver:** ${process.env.NVIDIA_VERSION} (${process.env.KERNEL_MODULE_TYPE} module)`,
-                ``,
-                `### Checklist`,
-                `- [ ] Pre-flight: stock-nvidia backup exists (\`/mnt/<pool>/.config/nvidia-gpu/nvidia-original.raw\`); run \`recover-stock-nvidia.sh\` if not.`,
-                `- [ ] \`sudo bash -c "\$(curl -fsSL https://raw.githubusercontent.com/${context.repo.owner}/${context.repo.repo}/main/scripts/install-nvidia-driver.sh)" -- --release=${tag}\``,
-                `- [ ] First run takes ≈ 8 min — builds \`nvidia.raw\` against the running kernel inside an \`ubuntu:24.04\` container, caches \`.update\` + \`.run\` to \`/mnt/<pool>/.config/nvidia-gpu/cache/\`.`,
-                `- [ ] Reboot when prompted.`,
-                `- [ ] \`nvidia-smi\` reports the new driver version with no NVML mismatch errors.`,
-                `- [ ] \`systemd-sysext status\` shows the custom \`nvidia\` merged.`,
-                `- [ ] \`midclt call initshutdownscript.query\` shows the \`nvidia-preinit-driver\` PREINIT entry.`,
-                `- [ ] Reboot again and confirm the driver still loads (PREINIT re-applies).`,
-                `- [ ] Re-run the install one-liner — should detect the cached \`nvidia.raw\` is valid for the running kernel + target driver and skip the rebuild (≈ 10 s).`,
-                `- [ ] \`install-nvidia-driver.sh --check\` reports all green.`,
-                ``,
-                `### Promote`,
-                `Once verified, open the [release page](${releaseUrl}) and click **Set as latest**, then close this issue.`,
-              ].join('\n'),
-            });
-            console.log(`Created hardware-test issue for ${tag}`);
