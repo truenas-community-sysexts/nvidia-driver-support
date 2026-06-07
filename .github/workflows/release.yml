@@ -33,10 +33,6 @@ on:
         description: 'NVIDIA kernel module flavor: open or proprietary (leave blank for latest tracked)'
         required: false
         default: ''
-      train_name:
-        description: 'TrueNAS train / codename (leave blank for latest tracked)'
-        required: false
-        default: ''
       mark_latest:
         description: 'Promote this release to GitHub "Latest" (manual dispatches default true; check-releases auto-builds pass false)'
         required: false
@@ -55,9 +51,6 @@ on:
         type: string
         required: true
       kernel_module_type:
-        type: string
-        required: true
-      train_name:
         type: string
         required: true
       mark_latest:
@@ -80,7 +73,6 @@ jobs:
       nvidia_version: ${{ steps.params.outputs.nvidia_version }}
       truenas_version: ${{ steps.params.outputs.truenas_version }}
       kernel_module_type: ${{ steps.params.outputs.kernel_module_type }}
-      train_name: ${{ steps.params.outputs.train_name }}
       release_tag: ${{ steps.params.outputs.release_tag }}
       mark_latest: ${{ steps.params.outputs.mark_latest }}
     steps:
@@ -97,7 +89,6 @@ jobs:
           INPUT_NVIDIA_VERSION: ${{ inputs.nvidia_version }}
           INPUT_TRUENAS_VERSION: ${{ inputs.truenas_version }}
           INPUT_KERNEL_MODULE_TYPE: ${{ inputs.kernel_module_type }}
-          INPUT_TRAIN_NAME: ${{ inputs.train_name }}
           INPUT_MARK_LATEST: ${{ inputs.mark_latest }}
           RUN_NUMBER: ${{ github.run_number }}
         run: |
@@ -108,19 +99,16 @@ jobs:
           with open('.github/tracked-versions.json') as f:
               d = json.load(f)
           print(d['truenas']['version'])
-          print(d['truenas']['train'])
           print(d['nvidia']['driver'])
           print(d['nvidia']['kernel_module_type'])
           ")
           TRACKED_TRUENAS=$(sed -n '1p' <<< "$TRACKED")
-          TRACKED_TRAIN=$(sed -n '2p' <<< "$TRACKED")
-          TRACKED_NVIDIA=$(sed -n '3p' <<< "$TRACKED")
-          TRACKED_KMOD=$(sed -n '4p' <<< "$TRACKED")
+          TRACKED_NVIDIA=$(sed -n '2p' <<< "$TRACKED")
+          TRACKED_KMOD=$(sed -n '3p' <<< "$TRACKED")
 
           NVIDIA_VERSION="${INPUT_NVIDIA_VERSION:-$TRACKED_NVIDIA}"
           TRUENAS_VERSION="${INPUT_TRUENAS_VERSION:-$TRACKED_TRUENAS}"
           KERNEL_MODULE_TYPE="${INPUT_KERNEL_MODULE_TYPE:-$TRACKED_KMOD}"
-          TRAIN_NAME="${INPUT_TRAIN_NAME:-$TRACKED_TRAIN}"
 
           # Tag policy: every build produces a unique immutable tag.
           # Format: v<truenas>-nvidia<driver>-r<run_number>
@@ -131,14 +119,13 @@ jobs:
             echo "nvidia_version=${NVIDIA_VERSION}"
             echo "truenas_version=${TRUENAS_VERSION}"
             echo "kernel_module_type=${KERNEL_MODULE_TYPE}"
-            echo "train_name=${TRAIN_NAME}"
             echo "release_tag=${RELEASE_TAG}"
             echo "mark_latest=${MARK_LATEST}"
           } >> "$GITHUB_OUTPUT"
 
           echo "Resolved build parameters:"
           echo "  NVIDIA:      ${NVIDIA_VERSION} (${KERNEL_MODULE_TYPE})"
-          echo "  TrueNAS:     ${TRUENAS_VERSION} (${TRAIN_NAME})"
+          echo "  TrueNAS:     ${TRUENAS_VERSION}"
           echo "  Release tag: ${RELEASE_TAG}"
           echo "  Mark latest: ${MARK_LATEST}"
 
