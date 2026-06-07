@@ -371,7 +371,6 @@ jobs:
               ref: 'main',
               inputs: {
                 truenas_version:    '${{ steps.write.outputs.truenas_version }}',
-                train_name:         '${{ steps.write.outputs.train }}',
                 nvidia_version:     '${{ steps.write.outputs.nvidia_driver }}',
                 kernel_module_type: '${{ steps.write.outputs.kernel_module_type }}',
                 mark_latest:        'false'
