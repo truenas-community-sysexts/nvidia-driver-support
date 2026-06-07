@@ -1,6 +1,6 @@
 name: Release
 
-# Cuts a versioned, user-installable TOOLING release.
+# Cuts a versioned "NVIDIA driver installer" release.
 #
 # A release is a snapshot of the MIT install tooling + the driver catalog (the
 # whole supported matrix) — it is NOT tied to a specific driver, kmod, or
@@ -50,7 +50,7 @@ jobs:
           tn = tracked["truenas"]["version"]
           raw = f"https://raw.githubusercontent.com/{repo}/main/scripts/install-nvidia-driver.sh"
           parts = [
-              "A **tooling + catalog** snapshot for swapping TrueNAS's stock NVIDIA driver. It ships the MIT install scripts + the driver catalog — **not a prebuilt driver** (NVIDIA's EULA bars redistributing the proprietary userspace). The install script detects your card and builds the right driver **on your host**, so this single release covers the whole supported matrix:",
+              "The **NVIDIA driver installer** for TrueNAS — the MIT install scripts + the driver catalog. It does **not** ship a prebuilt driver (NVIDIA's EULA bars redistributing the proprietary userspace): the installer detects your card and builds the right driver **on your host**, so this single release covers the whole supported matrix:",
               "",
               f"- **Open drivers** (Turing+): {open_latest}",
               f"- **Legacy branches**: `{bv('legacy-580')}` (Maxwell/Pascal/Volta), `{bv('legacy-470')}` (Kepler) — proprietary; `{bv('legacy-390')}` (Fermi), `{bv('legacy-340')}` (Tesla) — best-effort/patched",
@@ -80,7 +80,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ github.run_number }}
-          name: "Tooling + catalog release v${{ github.run_number }}"
+          name: "NVIDIA driver installer v${{ github.run_number }}"
           body_path: release-notes.md
           # MIT tooling + catalog only — no nvidia.raw (EULA, see header).
           files: |
