@@ -380,38 +380,73 @@ auto_kmod_for_version() {
 DETECTED_CODENAME=""
 DETECTED_NAME=""
 DETECTED_BRANCH=""
+DETECTED_DEVICE_ID=""
+DETECTED_UNCLASSIFIED=false
+# Detect an installed NVIDIA GPU and recommend a branch.
+#
+# Presence comes from /sys (vendor 0x10de + display class 0x03xx), so it works
+# even when lspci is absent. A chip codename — needed for a precise branch via
+# chip_map — is best-effort from lspci: a card newer than the host's PCI ID
+# database prints as "NVIDIA Corporation Device <id>" with NO codename (e.g. a
+# Blackwell 10de:2bb1 on an older pci.ids). In that "present but unclassified"
+# case we default to the latest OPEN driver, which is correct for anything
+# newer than the database (Turing and up). Returns 0 if any NVIDIA display GPU
+# is present (classified or not), 1 only if none is found.
 detect_gpu() {
-    command -v lspci >/dev/null 2>&1 || return 1
-    local line
-    # First NVIDIA (vendor 10de) display/3D controller line.
-    line=$(lspci -nn -d 10de: 2>/dev/null | grep -iE 'VGA|3D|Display' | head -1)
-    [ -n "$line" ] || line=$(lspci -nn -d 10de: 2>/dev/null | head -1)
-    [ -n "$line" ] || return 1
-    # Codename: 1-2 uppercase letters + digits right after "NVIDIA Corporation".
-    DETECTED_CODENAME=$(printf '%s' "$line" \
-        | sed -nE 's/.*NVIDIA Corporation ([A-Z]{1,2}[0-9]+[A-Z]?).*/\1/p')
-    # Marketing name: first [..] group that contains a letter and isn't the
-    # [10de:xxxx] vendor id (skips the numeric [0300] class code too).
-    DETECTED_NAME=$(printf '%s' "$line" \
-        | grep -oE '\[[^]]+\]' | grep -E '[A-Za-z]' | grep -viE '10de:' | head -1 | tr -d '[]')
-    [ -n "$DETECTED_CODENAME" ] || return 1
-    DETECTED_BRANCH=$(catalog_chip_branch "$DETECTED_CODENAME")
-    [ -n "$DETECTED_BRANCH" ] || return 1
+    local d v cls dev=""
+    for d in /sys/bus/pci/devices/*; do
+        [ -r "$d/vendor" ] && [ -r "$d/class" ] || continue
+        v=$(cat "$d/vendor" 2>/dev/null) || continue
+        [ "$v" = "0x10de" ] || continue
+        cls=$(cat "$d/class" 2>/dev/null)
+        case "$cls" in 0x03*) dev="$d"; break ;; esac   # 0300 VGA / 0302 3D
+    done
+    [ -n "$dev" ] || return 1
+    DETECTED_DEVICE_ID=$(cat "$dev/device" 2>/dev/null | sed 's/^0x//')
+
+    # Best-effort codename + marketing name from lspci (when present and the
+    # chip is in the local PCI ID database).
+    if command -v lspci >/dev/null 2>&1; then
+        local line
+        line=$(lspci -nn -d 10de: 2>/dev/null | grep -iE 'VGA|3D|Display' | head -1)
+        [ -n "$line" ] || line=$(lspci -nn -d 10de: 2>/dev/null | head -1)
+        DETECTED_CODENAME=$(printf '%s' "$line" \
+            | sed -nE 's/.*NVIDIA Corporation ([A-Z]{1,2}[0-9]+[A-Z]?).*/\1/p')
+        DETECTED_NAME=$(printf '%s' "$line" \
+            | grep -oE '\[[^]]+\]' | grep -E '[A-Za-z]' | grep -viE '10de:' | head -1 | tr -d '[]')
+    fi
+    [ -n "$DETECTED_NAME" ] || DETECTED_NAME="NVIDIA GPU [10de:${DETECTED_DEVICE_ID}]"
+
+    [ -n "$DETECTED_CODENAME" ] && DETECTED_BRANCH=$(catalog_chip_branch "$DETECTED_CODENAME")
+    if [ -z "$DETECTED_BRANCH" ]; then
+        # Present but unclassifiable → newest open driver is the safe default.
+        DETECTED_BRANCH="latest"
+        DETECTED_UNCLASSIFIED=true
+    fi
     return 0
 }
 
 # ─────────────────────────────────────────────────────────────────────────
 # --list
 # ─────────────────────────────────────────────────────────────────────────
-print_catalog() {
-    echo "=== NVIDIA driver catalog ==="
-    echo ""
-    echo "Latest open drivers (Turing and newer — RTX 20/30/40/50, A-series):"
-    local v first=true
+# The catalog body: open drivers (all open-module) + legacy branches with a
+# MODULES column. Shared by --list and the interactive picker so both show the
+# full matrix and the open/proprietary flavor. Optional $1 = branch to mark as
+# "recommended" (the card-detected default).
+print_catalog_body() {
+    local rec="${1:-}"
+    echo "Open drivers (Turing and newer — open kernel modules):"
+    printf "  %-12s %-11s %s\n" "VERSION" "MODULES" "SELECT"
+    local v first=true mark
     while IFS= read -r v; do
         [ -z "$v" ] && continue
-        if $first; then echo "  $v   (--branch=latest)"; first=false
-        else echo "  $v"; fi
+        if $first; then
+            mark=""; [ "$rec" = "latest" ] && mark="  <- recommended"
+            printf "  %-12s %-11s %s%s\n" "$v" "open" "--branch=latest" "$mark"
+            first=false
+        else
+            printf "  %-12s %-11s %s\n" "$v" "open" "--driver=$v"
+        fi
     done < <(catalog_open_latest)
     echo ""
     echo "Legacy branches (last driver for a card series TrueNAS dropped):"
@@ -422,9 +457,18 @@ print_catalog() {
         ver=$(catalog_branch_version "$b")
         kmod=$(catalog_branch_field "$b" kmod)
         sup=$(catalog_branch_field "$b" support)
-        printf "  %-14s %-12s %-12s %s\n" "$b" "${ver:-?}" "$kmod" "$sup"
+        mark=""; [ "$rec" = "$b" ] && mark="  <- recommended"
+        printf "  %-14s %-12s %-12s %s%s\n" "$b" "${ver:-?}" "$kmod" "$sup" "$mark"
     done < <(catalog_branch_names)
+}
+
+print_catalog() {
+    echo "=== NVIDIA driver catalog ==="
     echo ""
+    print_catalog_body
+    echo ""
+    echo "  modules: open = Turing+ (auto-derived); proprietary = legacy branches."
+    echo "           override with --kmod=open|proprietary"
     echo "  supported   = builds against TrueNAS's current kernel"
     echo "  best-effort = won't cross-compile unpatched; bring --custom-run=PATH"
     echo ""
@@ -704,11 +748,18 @@ if [ -z "$DRIVER_SRC" ]; then
         # Interactive: detect card, recommend a branch.
         echo "Detecting NVIDIA GPU..."
         if detect_gpu; then
-            echo "  Found: ${DETECTED_NAME:-$DETECTED_CODENAME} (chip ${DETECTED_CODENAME})"
-            echo "  Recommended branch: ${DETECTED_BRANCH}"
+            if $DETECTED_UNCLASSIFIED; then
+                echo "  Found: ${DETECTED_NAME} (10de:${DETECTED_DEVICE_ID})"
+                echo "  This chip isn't in the system's PCI ID database (it's newer than the DB),"
+                echo "  so defaulting to the latest OPEN driver — correct for Turing and newer."
+                echo "  If this is a pre-Turing card (Kepler/Maxwell/Pascal/Volta), pick a legacy branch below."
+            else
+                echo "  Found: ${DETECTED_NAME:-$DETECTED_CODENAME} (chip ${DETECTED_CODENAME})"
+            fi
+            echo "  Recommended: --branch=${DETECTED_BRANCH}"
             SELECTED_BRANCH="$DETECTED_BRANCH"
         else
-            echo "  Could not auto-detect a recommended branch (lspci unavailable or unknown card)."
+            echo "  No NVIDIA GPU detected (no 0x10de display device under /sys)."
         fi
         if ! { : </dev/tty; } 2>/dev/null && [ -z "$SELECTED_BRANCH" ]; then
             echo "ERROR: no card detected and no controlling terminal to prompt." >&2
@@ -717,15 +768,7 @@ if [ -z "$DRIVER_SRC" ]; then
         fi
         if { : </dev/tty; } 2>/dev/null; then
             echo ""
-            echo "Available branches (see --list for versions):"
-            local_b=""
-            while IFS= read -r local_b; do
-                ver=$(catalog_branch_version "$local_b")
-                sup=$(catalog_branch_field "$local_b" support)
-                marker=""
-                [ "$local_b" = "$SELECTED_BRANCH" ] && marker="  <- recommended"
-                printf "    %-14s %-12s %s%s\n" "$local_b" "${ver:-?}" "$sup" "$marker"
-            done < <(catalog_branch_names)
+            print_catalog_body "$SELECTED_BRANCH"
             echo ""
             if [ -n "$SELECTED_BRANCH" ]; then
                 printf "Branch [%s], or type another / a X.Y.Z version: " "$SELECTED_BRANCH"

@@ -23,7 +23,7 @@ The driver-build machinery is a driver-only fork of [`nvidia-mig-support`](https
 
 ## How a card maps to a driver
 
-The picker reads [`catalog/driver-catalog.json`](catalog/driver-catalog.json) (refreshed daily by CI) and detects your GPU's chip family from `lspci` to recommend a branch:
+The picker reads [`catalog/driver-catalog.json`](catalog/driver-catalog.json) (refreshed daily by CI) and detects your GPU via `/sys` (with `lspci` for the exact chip name when the system's PCI database knows it) to recommend a branch:
 
 | Your card (chip family) | Examples | Branch | Modules | Status |
 | --- | --- | --- | --- | --- |
@@ -35,7 +35,13 @@ The picker reads [`catalog/driver-catalog.json`](catalog/driver-catalog.json) (r
 
 ¹ **best-effort** branches don't cross-compile against TrueNAS's current (6.x) kernel without patches. Bring a patched installer via `--custom-run` — see [docs/legacy-cards.md](docs/legacy-cards.md).
 
-`sudo install-nvidia-driver.sh --list` prints the live catalog with exact versions.
+A card **newer than the host's PCI database** (e.g. a just-released GPU) won't have a chip name to map, but it's still detected as an NVIDIA display device via `/sys` and treated as Turing+ → the latest open driver.
+
+`--list` prints the live catalog with exact versions **and module flavor**. Through the `curl … | sudo bash` one-liner, flags for the script go after `bash -s --` (otherwise they're consumed by `curl`/`bash`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-driver-support/main/scripts/install-nvidia-driver.sh | sudo bash -s -- --list
+```
 
 ## The four ways to choose a driver
 
