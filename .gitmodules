@@ -1,0 +1,3 @@
+[submodule "third_party/nvidia-470xx-linux-mainline"]
+	path = third_party/nvidia-470xx-linux-mainline
+	url = https://github.com/joanbm/nvidia-470xx-linux-mainline
