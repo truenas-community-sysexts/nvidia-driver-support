@@ -24,7 +24,12 @@ with a driver **catalog + card-aware picker** on top and all MIG tooling removed
 ```
 
 Unlike the MIG repo there is no second lightweight sysext — the only artifact is the
-driver `nvidia.raw`, swapped in place of the one TrueNAS ships.
+driver `nvidia.raw`, swapped in place of the one TrueNAS ships. Because it's the only
+sysext (no second tooling sysext to collide with), `nvidia.raw` also bundles the MIT
+`uninstall-nvidia-driver` at `/usr/bin/` — on PATH whenever the custom driver is merged.
+The install script additionally stages a copy (plus `recover-stock-nvidia.sh` and the build
+helpers) to `/mnt/<pool>/.config/nvidia-gpu/scripts/`, which survives when the sysext is
+unmerged or restored to stock — so an uninstall always has a script to run.
 
 ## Build pipeline
 

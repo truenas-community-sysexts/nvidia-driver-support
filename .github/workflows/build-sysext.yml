@@ -143,3 +143,7 @@ jobs:
           test -f dist/nvidia.raw
           echo "Built: $(du -h dist/nvidia.raw | cut -f1)"
           unsquashfs -l dist/nvidia.raw | grep -E 'libnvidia-ml\.so|nvidia\.ko' | head
+          # Uninstaller must be bundled on PATH (build-nvidia-sysext.sh Phase 5b).
+          unsquashfs -l dist/nvidia.raw | grep -q 'usr/bin/uninstall-nvidia-driver$' \
+            || { echo "::error::uninstall-nvidia-driver not bundled in nvidia.raw"; exit 1; }
+          echo "ok: /usr/bin/uninstall-nvidia-driver bundled"
