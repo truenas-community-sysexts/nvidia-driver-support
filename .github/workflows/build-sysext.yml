@@ -29,6 +29,13 @@ on:
 permissions:
   contents: read
 
+# Cancel an in-progress run when a new commit is pushed to the same ref, so
+# rapid PR iteration doesn't stack overlapping ~9-job builds. Each event type
+# gets its own group (a workflow_dispatch on a branch won't cancel a PR run).
+concurrency:
+  group: build-sysext-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   prepare:
     runs-on: ubuntu-latest
