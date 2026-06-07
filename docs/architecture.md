@@ -99,31 +99,28 @@ GPU chip prefix, and recommends a branch. The catalog is refreshed daily by
 
 ## Releases + cadence
 
-A release is a versioned bundle of the **MIT install tooling + catalog**, tagged
-`v<truenas>-nvidia<driver>-rN`. It deliberately carries **no `nvidia.raw`**: NVIDIA's EULA
-forbids redistributing the proprietary userspace (same reason the MIG repo only publishes its
-open component), so the driver is always assembled on the user's host. The `nvidia` block in
-[`.github/tracked-versions.json`](../.github/tracked-versions.json) pins the recommended
-driver + TrueNAS combo a release was cut for.
+A release is a **tooling + catalog snapshot**, tagged `v<N>` (the auto-incrementing
+`github.run_number`). It carries the MIT install scripts + the driver catalog and **no
+`nvidia.raw`** (EULA — same reason the MIG repo only publishes its open component). Critically
+it is **not** tied to a driver, module flavor, or TrueNAS version: the install script reads the
+bundled catalog, detects the card, and builds the right driver on the host against the host's
+kernel. So one release covers the whole driver × kmod × card matrix and works across TrueNAS
+versions — a kernel bump just triggers an on-host rebuild. (This is why the old
+`v<truenas>-nvidia<driver>-rN` scheme, inherited from the Blackwell-only MIG repo, didn't fit.)
 
-- [`release.yml`](../.github/workflows/release.yml) — `resolve` (read tracked-versions / apply
-  dispatch overrides) → `publish` (tag a release carrying the scripts + catalog + notes).
-  **Nothing is built**: a release is a snapshot of static repo files, so there's no artifact to
-  gate on a build (the driver is built on the user's host). Auto-builds pass `mark_latest=false`
-  and open a `hardware-test` issue; a maintainer promotes to "Latest" after verifying on real
-  hardware.
-- [`check-releases.yml`](../.github/workflows/check-releases.yml) — daily; watches TrueNAS
-  scale-build tags and NVIDIA `latest.txt` (each gated on the artifact actually being
-  published/mirrored), bumps `tracked-versions.json`, then dispatches **two** workflows for the
-  new combo: `build-sysext.yml` (the smoke build — this is where a version bump gets its
-  `nvidia.raw` compile check, since no PR runs for a tracked-versions bump) and `release.yml`.
-  Distinct from `check-drivers.yml`, which refreshes the picker catalog.
+- [`release.yml`](../.github/workflows/release.yml) — a single `publish` job, **zero inputs**:
+  checkout → generate notes from the catalog (so the "supported" list can't drift) → tag `v<N>`
+  and attach the scripts + catalog. Nothing is built; always promoted to "Latest" (every cut is
+  deliberate). Run it manually whenever the tooling or catalog has changed enough to publish.
+- [`check-drivers.yml`](../.github/workflows/check-drivers.yml) — daily; refreshes the picker
+  catalog (`open_latest` + legacy pins) from the NVIDIA index. (There is no auto-release cadence:
+  releases are cut by hand, since a TrueNAS/NVIDIA bump changes a release's *content* only via
+  the catalog, and the tooling is version-agnostic.)
 
-Build validation thus lives in the smoke (`build-sysext.yml`) — on PRs that touch the build
-path, and on version bumps via `check-releases` — never in the release's critical path.
+Build validation lives entirely in the smoke (`build-sysext.yml`) on PRs that touch the build
+path, plus the user's on-host build — never in the release path.
 
-`install-nvidia-driver.sh` sources its tooling + catalog from the newest release matching the
-host's TrueNAS version (or `--release=TAG` to pin), falling back to `main` when none matches —
-so installs work before any release exists. An auto-resolved release only affects *sourcing*;
-it never overrides the card-detect driver recommendation. Only an explicit `--release` (with no
-other selector) installs the driver that release pins.
+`install-nvidia-driver.sh` sources its tooling + catalog from the repo's **latest** release (or
+`--release=TAG` to pin), falling back to `main` when none exists — so installs work before any
+release is cut. A release only affects *sourcing*; driver selection stays card-detect /
+`--branch` / `--driver` / `--custom-run`.

@@ -61,11 +61,6 @@ jobs:
               print("truenas.version missing or malformed", file=sys.stderr); sys.exit(1)
           if not tn.get("train"):
               print("truenas.train missing", file=sys.stderr); sys.exit(1)
-          nv = d.get("nvidia", {})
-          if not re.match(r'^\d+\.\d+\.\d+$', str(nv.get("driver", ""))):
-              print("nvidia.driver missing or malformed (want X.Y.Z)", file=sys.stderr); sys.exit(1)
-          if nv.get("kernel_module_type") not in ("open", "proprietary"):
-              print("nvidia.kernel_module_type must be 'open' or 'proprietary'", file=sys.stderr); sys.exit(1)
           print("tracked-versions.json OK")
           PY
 

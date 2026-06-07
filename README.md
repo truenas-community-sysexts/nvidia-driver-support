@@ -71,15 +71,15 @@ Nothing pre-built is downloaded: NVIDIA's EULA prohibits redistributing the prop
 
 ## Releases
 
-Tagged releases (`v<truenas>-nvidia<driver>-rN`) carry the **install tooling + driver catalog**, never a prebuilt driver — the EULA point above means `nvidia.raw` is always built on your host. A daily job cuts a fresh release when TrueNAS or NVIDIA upstream moves; auto-builds stay off GitHub "Latest" until a maintainer hardware-verifies them.
+A release is a **tooling + catalog snapshot**, tagged `v<N>` (an auto-incrementing counter). It carries the install scripts + the driver catalog (the whole supported matrix) — never a prebuilt driver, since the EULA point above means `nvidia.raw` is always built on your host. **It is not tied to a driver, module flavor, or TrueNAS version**: the install script reads the bundled catalog, detects your card, and builds the right driver against your host's kernel, so one release covers everything and works across TrueNAS versions (a kernel bump just triggers an on-host rebuild).
 
-The install one-liner pulls the newest release matching your TrueNAS version for its tooling + catalog (falling back to `main` when none matches). To pin an exact, reproducible tooling + catalog snapshot:
+The install one-liner pulls the repo's **latest** release for its tooling + catalog (falling back to `main` when none exists). To pin an exact, reproducible snapshot:
 
 ```bash
-curl -fsSL .../scripts/install-nvidia-driver.sh | sudo bash -s -- --release=v25.10.3.1-nvidia610.43.02-r5
+curl -fsSL .../scripts/install-nvidia-driver.sh | sudo bash -s -- --release=v7
 ```
 
-`--release` with no driver selector also installs the driver that release pins. Combine it with `--branch`/`--driver` to keep the pinned tooling but pick a different driver (e.g. a legacy branch for an older card) — the card-detect recommendation is never overridden by an auto-resolved release.
+`--release` only pins the tooling + catalog snapshot — driver selection is unchanged (card-detect / `--branch` / `--driver` / `--custom-run`).
 
 ## Prerequisites
 

@@ -1,11 +1,7 @@
 {
-  "_comment": "Tracked TrueNAS + NVIDIA target. Drives the CI smoke build (build-sysext.yml) and the release workflow (release.yml); check-releases.yml bumps these daily from upstream and dispatches a release. The full driver catalog (legacy branch pins, open_latest) lives in catalog/driver-catalog.json, refreshed by check-drivers.yml.",
+  "_comment": "TrueNAS target for the CI smoke build (build-sysext.yml). Driver versions live in catalog/driver-catalog.json (refreshed by check-drivers.yml); releases are tooling+catalog snapshots and don't pin a driver, so no nvidia version is tracked here.",
   "truenas": {
     "version": "25.10.4",
     "train": "Goldeye"
-  },
-  "nvidia": {
-    "driver": "610.43.02",
-    "kernel_module_type": "open"
   }
 }
