@@ -69,6 +69,18 @@ The kernel-module flavor (`--kmod`) is auto-derived — **open** for Turing+, **
 
 Nothing pre-built is downloaded: NVIDIA's EULA prohibits redistributing the proprietary userspace, so `nvidia.raw` is **only ever assembled on your machine**, where you accept NVIDIA's license when the `.run` runs with `--silent`.
 
+## Releases
+
+Tagged releases (`v<truenas>-nvidia<driver>-rN`) carry the **install tooling + driver catalog**, never a prebuilt driver — the EULA point above means `nvidia.raw` is always built on your host. A daily job cuts a fresh release when TrueNAS or NVIDIA upstream moves; auto-builds stay off GitHub "Latest" until a maintainer hardware-verifies them.
+
+The install one-liner pulls the newest release matching your TrueNAS version for its tooling + catalog (falling back to `main` when none matches). To pin an exact, reproducible tooling + catalog snapshot:
+
+```bash
+curl -fsSL .../scripts/install-nvidia-driver.sh | sudo bash -s -- --release=v25.10.3.1-nvidia610.43.02-r5
+```
+
+`--release` with no driver selector also installs the driver that release pins. Combine it with `--branch`/`--driver` to keep the pinned tooling but pick a different driver (e.g. a legacy branch for an older card) — the card-detect recommendation is never overridden by an auto-resolved release.
+
 ## Prerequisites
 
 - TrueNAS SCALE 25.10 or later

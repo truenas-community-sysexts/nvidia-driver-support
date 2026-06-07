@@ -1,0 +1,419 @@
+name: Release
+
+# Cuts a versioned, user-installable release: tag `v<truenas>-nvidia<driver>-r<run>`.
+#
+# What a release carries: the MIT install tooling (install/uninstall/preinit/
+# recover/build scripts) + the driver catalog + release notes. It does NOT
+# carry nvidia.raw — NVIDIA's EULA prohibits us redistributing the proprietary
+# userspace, so the driver is always assembled on the user's own TrueNAS host
+# (see README License section). The build-nvidia job still builds + smoke-tests
+# nvidia.raw as a GATE so a broken driver build blocks the release; the artifact
+# is kept on the run page (30 days) for inspection but never published.
+#
+# Triggered manually (workflow_dispatch) or by check-releases.yml when TrueNAS
+# or NVIDIA upstream moves (workflow_call, mark_latest=false → awaits hardware
+# verification before promotion to GitHub "Latest").
+
+on:
+  workflow_dispatch:
+    inputs:
+      nvidia_version:
+        description: 'NVIDIA driver version (leave blank for latest tracked)'
+        required: false
+        default: ''
+      truenas_version:
+        description: 'TrueNAS version (leave blank for latest tracked)'
+        required: false
+        default: ''
+      kernel_module_type:
+        description: 'NVIDIA kernel module flavor: open or proprietary (leave blank for latest tracked)'
+        required: false
+        default: ''
+      train_name:
+        description: 'TrueNAS train / codename (leave blank for latest tracked)'
+        required: false
+        default: ''
+      mark_latest:
+        description: 'Promote this release to GitHub "Latest" (manual dispatches default true; check-releases auto-builds pass false)'
+        required: false
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+        default: 'true'
+
+  workflow_call:
+    inputs:
+      nvidia_version:
+        type: string
+        required: true
+      truenas_version:
+        type: string
+        required: true
+      kernel_module_type:
+        type: string
+        required: true
+      train_name:
+        type: string
+        required: true
+      mark_latest:
+        type: string
+        required: false
+        default: 'false'
+
+permissions:
+  contents: write
+  issues: write  # required by the auto-create hardware-test issue step (mark_latest=false path)
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────
+  # resolve — single source of truth for build parameters. tracked-versions
+  # provides defaults; workflow inputs override. Both downstream jobs consume.
+  # ───────────────────────────────────────────────────────────────────────
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      nvidia_version: ${{ steps.params.outputs.nvidia_version }}
+      truenas_version: ${{ steps.params.outputs.truenas_version }}
+      kernel_module_type: ${{ steps.params.outputs.kernel_module_type }}
+      train_name: ${{ steps.params.outputs.train_name }}
+      release_tag: ${{ steps.params.outputs.release_tag }}
+      mark_latest: ${{ steps.params.outputs.mark_latest }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            .github/tracked-versions.json
+          sparse-checkout-cone-mode: false
+
+      - name: Resolve build parameters
+        id: params
+        env:
+          INPUT_NVIDIA_VERSION: ${{ inputs.nvidia_version }}
+          INPUT_TRUENAS_VERSION: ${{ inputs.truenas_version }}
+          INPUT_KERNEL_MODULE_TYPE: ${{ inputs.kernel_module_type }}
+          INPUT_TRAIN_NAME: ${{ inputs.train_name }}
+          INPUT_MARK_LATEST: ${{ inputs.mark_latest }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+
+          TRACKED=$(python3 -c "
+          import json
+          with open('.github/tracked-versions.json') as f:
+              d = json.load(f)
+          print(d['truenas']['version'])
+          print(d['truenas']['train'])
+          print(d['nvidia']['driver'])
+          print(d['nvidia']['kernel_module_type'])
+          ")
+          TRACKED_TRUENAS=$(sed -n '1p' <<< "$TRACKED")
+          TRACKED_TRAIN=$(sed -n '2p' <<< "$TRACKED")
+          TRACKED_NVIDIA=$(sed -n '3p' <<< "$TRACKED")
+          TRACKED_KMOD=$(sed -n '4p' <<< "$TRACKED")
+
+          NVIDIA_VERSION="${INPUT_NVIDIA_VERSION:-$TRACKED_NVIDIA}"
+          TRUENAS_VERSION="${INPUT_TRUENAS_VERSION:-$TRACKED_TRUENAS}"
+          KERNEL_MODULE_TYPE="${INPUT_KERNEL_MODULE_TYPE:-$TRACKED_KMOD}"
+          TRAIN_NAME="${INPUT_TRAIN_NAME:-$TRACKED_TRAIN}"
+
+          # Tag policy: every build produces a unique immutable tag.
+          # Format: v<truenas>-nvidia<driver>-r<run_number>
+          RELEASE_TAG="v${TRUENAS_VERSION}-nvidia${NVIDIA_VERSION}-r${RUN_NUMBER}"
+          MARK_LATEST="${INPUT_MARK_LATEST:-true}"
+
+          {
+            echo "nvidia_version=${NVIDIA_VERSION}"
+            echo "truenas_version=${TRUENAS_VERSION}"
+            echo "kernel_module_type=${KERNEL_MODULE_TYPE}"
+            echo "train_name=${TRAIN_NAME}"
+            echo "release_tag=${RELEASE_TAG}"
+            echo "mark_latest=${MARK_LATEST}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Resolved build parameters:"
+          echo "  NVIDIA:      ${NVIDIA_VERSION} (${KERNEL_MODULE_TYPE})"
+          echo "  TrueNAS:     ${TRUENAS_VERSION} (${TRAIN_NAME})"
+          echo "  Release tag: ${RELEASE_TAG}"
+          echo "  Mark latest: ${MARK_LATEST}"
+
+  # ───────────────────────────────────────────────────────────────────────
+  # build-nvidia — builds + smoke-tests nvidia.raw as a release GATE.
+  # The artifact is NOT published (EULA); a failed build blocks publish via
+  # `needs:`. Hardcoded ubuntu-24.04 to match the on-host ubuntu:24.04 build.
+  # ───────────────────────────────────────────────────────────────────────
+  build-nvidia:
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential gcc-14 squashfs-tools kmod xz-utils \
+            bison flex libelf-dev bc rsync libssl-dev pkg-config \
+            pciutils gnupg ca-certificates wget curl patch
+
+      # TrueNAS .update is 1–3 GB; cache per-version. The build script honors
+      # --update-file= to load a pre-staged file from this path.
+      - name: Restore cached TrueNAS .update
+        id: update-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: /tmp/truenas.update
+          key: truenas-update-${{ needs.resolve.outputs.truenas_version }}
+
+      - name: Build nvidia.raw
+        env:
+          NVIDIA_VERSION: ${{ needs.resolve.outputs.nvidia_version }}
+          TRUENAS_VERSION: ${{ needs.resolve.outputs.truenas_version }}
+          NVIDIA_KERNEL_MODULE_TYPE: ${{ needs.resolve.outputs.kernel_module_type }}
+          TRAIN_NAME: ${{ needs.resolve.outputs.train_name }}
+        run: |
+          ARGS=(
+            --nvidia-version="$NVIDIA_VERSION"
+            --truenas-version="$TRUENAS_VERSION"
+            --kernel-module-type="$NVIDIA_KERNEL_MODULE_TYPE"
+            --truenas-codename="$TRAIN_NAME"
+            --out=dist
+          )
+          if [ -f /tmp/truenas.update ]; then
+            ARGS+=(--update-file=/tmp/truenas.update)
+          fi
+          sudo -E scripts/build-nvidia-sysext.sh "${ARGS[@]}"
+
+      - name: Save TrueNAS .update to cache
+        if: steps.update-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: /tmp/truenas.update
+          key: truenas-update-${{ needs.resolve.outputs.truenas_version }}
+
+      - name: Inspect output
+        run: |
+          ls -la dist/
+          du -h dist/nvidia.raw
+          echo "SHA256: $(cat dist/nvidia.raw.sha256)"
+
+      - name: Smoke-test nvidia.raw contents
+        run: |
+          set -e
+          SMOKE_TMP="$(mktemp -d)"
+          trap 'rm -rf "$SMOKE_TMP"' EXIT
+
+          unsquashfs -d "${SMOKE_TMP}/extract" dist/nvidia.raw >/dev/null
+
+          fail=0
+          require_file() {
+            local rel="$1"
+            if [ ! -e "${SMOKE_TMP}/extract/${rel}" ]; then
+              echo "::error title=smoke-test::missing in nvidia.raw: ${rel}"; fail=1; return
+            fi
+            echo "  ok: ${rel}"
+          }
+          require_elf() {
+            local rel="$1"
+            local path="${SMOKE_TMP}/extract/${rel}"
+            if [ ! -f "$path" ]; then
+              echo "::error title=smoke-test::missing in nvidia.raw: ${rel}"; fail=1; return
+            fi
+            if ! file "$path" | grep -q 'ELF'; then
+              echo "::error title=smoke-test::not an ELF binary: ${rel}"; file "$path"; fail=1; return
+            fi
+            echo "  ok (ELF): ${rel}"
+          }
+
+          echo "=== smoke-test: required paths ==="
+          require_file "usr/lib/extension-release.d/extension-release.nvidia"
+          require_elf  "usr/bin/nvidia-smi"
+
+          for lib in libnvidia-ml libcuda; do
+            so_rel=$(cd "${SMOKE_TMP}/extract" && \
+              find usr/lib -name "${lib}.so.*" -not -type l 2>/dev/null | head -1) || true
+            if [ -z "$so_rel" ]; then
+              echo "::error title=smoke-test::no concrete ${lib}.so.* found in nvidia.raw"; fail=1
+            else
+              require_elf "$so_rel"
+            fi
+          done
+
+          # Kernel module + vermagic consistency.
+          KVER_DIRS=$(cd "${SMOKE_TMP}/extract" && \
+            find usr/lib/modules -mindepth 1 -maxdepth 1 -type d 2>/dev/null \
+            | sed 's|usr/lib/modules/||')
+          KVER_COUNT=$(printf '%s\n' "$KVER_DIRS" | grep -c . || true)
+          if [ "$KVER_COUNT" -ne 1 ]; then
+            echo "::error title=smoke-test::expected exactly one kernel dir under usr/lib/modules, got ${KVER_COUNT}: ${KVER_DIRS}"; fail=1
+          else
+            KVER="$KVER_DIRS"
+            echo "  found kernel-modules dir: ${KVER}"
+            KO_PATH=$(find "${SMOKE_TMP}/extract/usr/lib/modules/${KVER}" \
+              -name 'nvidia.ko' -not -name 'nvidia-*.ko' -type f | head -1)
+            if [ -z "$KO_PATH" ]; then
+              echo "::error title=smoke-test::nvidia.ko not found under usr/lib/modules/${KVER}/"; fail=1
+            else
+              echo "  found nvidia.ko at: ${KO_PATH#"${SMOKE_TMP}/extract/"}"
+              VERMAGIC=$(modinfo -F vermagic "$KO_PATH" 2>/dev/null || true)
+              if [ -z "$VERMAGIC" ]; then
+                echo "::error title=smoke-test::could not read vermagic from nvidia.ko"; fail=1
+              elif ! printf '%s' "$VERMAGIC" | grep -qF "$KVER"; then
+                echo "::error title=smoke-test::nvidia.ko vermagic does not reference KVER (${KVER}); got: ${VERMAGIC}"; fail=1
+              else
+                echo "  ok: nvidia.ko vermagic references ${KVER}"
+              fi
+            fi
+          fi
+
+          if [ "$fail" -ne 0 ]; then
+            echo "::error title=smoke-test::nvidia.raw failed smoke-test — refusing to publish"
+            exit 1
+          fi
+          echo "smoke-test OK"
+
+      - name: Upload nvidia.raw artifact (run-page only, never published)
+        uses: actions/upload-artifact@v7
+        with:
+          name: nvidia-raw
+          path: |
+            dist/nvidia.raw
+            dist/nvidia.raw.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  # ───────────────────────────────────────────────────────────────────────
+  # publish — tag a release carrying the MIT tooling + catalog + notes.
+  # nvidia.raw is intentionally NOT attached (EULA). The build-nvidia smoke
+  # gate above must pass first (`needs:`), so a broken driver build blocks it.
+  # ───────────────────────────────────────────────────────────────────────
+  publish:
+    needs: [resolve, build-nvidia]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Write release notes
+        env:
+          NVIDIA_VERSION: ${{ needs.resolve.outputs.nvidia_version }}
+          KERNEL_MODULE_TYPE: ${{ needs.resolve.outputs.kernel_module_type }}
+          TRUENAS_VERSION: ${{ needs.resolve.outputs.truenas_version }}
+          COMMIT_SHA: ${{ github.sha }}
+          RUN_NUMBER: ${{ github.run_number }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+        run: |
+          cat > release-notes.md <<EOF
+          Swap TrueNAS's stock NVIDIA driver for a different version (newer for hardware compatibility, or a legacy branch for an older card) as a systemd-sysext. The driver \`nvidia.raw\` is assembled on your own TrueNAS host — we don't redistribute NVIDIA's proprietary userspace — so this release ships the install tooling + driver catalog, not a prebuilt driver.
+
+          The release tag pins the recommended NVIDIA driver + TrueNAS combo this build was tested against. The install script auto-detects your card and recommends a driver; pass \`--release=${RELEASE_TAG}\` to pin this exact tooling + catalog snapshot.
+
+          - TrueNAS:       \`${TRUENAS_VERSION}\`
+          - Pinned driver: \`${NVIDIA_VERSION}\` (${KERNEL_MODULE_TYPE} module)
+          - Run number:    ${RUN_NUMBER}
+          - Source commit: \`${COMMIT_SHA}\`
+
+          Install (detects your card, recommends a driver, builds on-host):
+
+          \`curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install-nvidia-driver.sh | sudo bash\`
+
+          Pin this release's tooling + catalog:
+
+          \`curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install-nvidia-driver.sh | sudo bash -s -- --release=${RELEASE_TAG}\`
+
+          By installing you accept the [NVIDIA Linux Driver License](https://www.nvidia.com/en-us/drivers/nvidia-license/) — the build invokes the official \`.run\` installer with \`--silent\` on your host. **Reboot required** after install.
+          EOF
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.resolve.outputs.release_tag }}
+          name: "TrueNAS ${{ needs.resolve.outputs.truenas_version }} - NVIDIA ${{ needs.resolve.outputs.nvidia_version }} (r${{ github.run_number }})"
+          body_path: release-notes.md
+          # MIT tooling + catalog only — no nvidia.raw (EULA, see header).
+          files: |
+            scripts/install-nvidia-driver.sh
+            scripts/uninstall-nvidia-driver.sh
+            scripts/nvidia-preinit-driver.sh
+            scripts/recover-stock-nvidia.sh
+            scripts/build-on-host.sh
+            scripts/build-nvidia-sysext.sh
+            catalog/driver-catalog.json
+          draft: false
+          prerelease: false
+          make_latest: ${{ needs.resolve.outputs.mark_latest }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Auto-builds (mark_latest=false) need hardware verification before
+      # promotion to "Latest". One issue per release tag.
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Create hardware-test issue for auto-build
+        if: needs.resolve.outputs.mark_latest == 'false'
+        uses: actions/github-script@v9
+        env:
+          TAG: ${{ needs.resolve.outputs.release_tag }}
+          TRUENAS_VERSION: ${{ needs.resolve.outputs.truenas_version }}
+          NVIDIA_VERSION: ${{ needs.resolve.outputs.nvidia_version }}
+          KERNEL_MODULE_TYPE: ${{ needs.resolve.outputs.kernel_module_type }}
+        with:
+          script: |
+            const tag = process.env.TAG;
+            const title = `Hardware test: TrueNAS ${process.env.TRUENAS_VERSION} / NVIDIA ${process.env.NVIDIA_VERSION} (${tag})`;
+            const releaseUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/releases/tag/${tag}`;
+
+            try {
+              await github.rest.issues.createLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'hardware-test',
+                color: 'FBCA04',
+                description: 'Auto-build awaiting hardware verification',
+              });
+            } catch (e) {
+              if (e.status !== 422) throw e;  // 422 = already exists
+            }
+
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'hardware-test',
+              per_page: 100,
+            });
+            if (existing.data.some(i => i.title.includes(tag))) {
+              console.log(`Open hardware-test issue already exists for ${tag} — skipping`);
+              return;
+            }
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              labels: ['hardware-test'],
+              body: [
+                `An auto-build published a new release that needs hardware verification before being promoted to **Latest**.`,
+                ``,
+                `**Release:** [${tag}](${releaseUrl})`,
+                `**TrueNAS:** ${process.env.TRUENAS_VERSION}`,
+                `**NVIDIA driver:** ${process.env.NVIDIA_VERSION} (${process.env.KERNEL_MODULE_TYPE} module)`,
+                ``,
+                `### Checklist`,
+                `- [ ] Pre-flight: stock-nvidia backup exists (\`/mnt/<pool>/.config/nvidia-gpu/nvidia-original.raw\`); run \`recover-stock-nvidia.sh\` if not.`,
+                `- [ ] \`sudo bash -c "\$(curl -fsSL https://raw.githubusercontent.com/${context.repo.owner}/${context.repo.repo}/main/scripts/install-nvidia-driver.sh)" -- --release=${tag}\``,
+                `- [ ] First run takes ≈ 8 min — builds \`nvidia.raw\` against the running kernel inside an \`ubuntu:24.04\` container, caches \`.update\` + \`.run\` to \`/mnt/<pool>/.config/nvidia-gpu/cache/\`.`,
+                `- [ ] Reboot when prompted.`,
+                `- [ ] \`nvidia-smi\` reports the new driver version with no NVML mismatch errors.`,
+                `- [ ] \`systemd-sysext status\` shows the custom \`nvidia\` merged.`,
+                `- [ ] \`midclt call initshutdownscript.query\` shows the \`nvidia-preinit-driver\` PREINIT entry.`,
+                `- [ ] Reboot again and confirm the driver still loads (PREINIT re-applies).`,
+                `- [ ] Re-run the install one-liner — should detect the cached \`nvidia.raw\` is valid for the running kernel + target driver and skip the rebuild (≈ 10 s).`,
+                `- [ ] \`install-nvidia-driver.sh --check\` reports all green.`,
+                ``,
+                `### Promote`,
+                `Once verified, open the [release page](${releaseUrl}) and click **Set as latest**, then close this issue.`,
+              ].join('\n'),
+            });
+            console.log(`Created hardware-test issue for ${tag}`);
