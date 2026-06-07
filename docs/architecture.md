@@ -107,14 +107,20 @@ open component), so the driver is always assembled on the user's host. The `nvid
 driver + TrueNAS combo a release was cut for.
 
 - [`release.yml`](../.github/workflows/release.yml) — `resolve` (read tracked-versions / apply
-  dispatch overrides) → `build-nvidia` (build + smoke-test `nvidia.raw` as a **gate** — a broken
-  driver build blocks the release; the artifact is never published) → `publish` (tag a release
-  carrying the scripts + catalog + notes). Auto-builds pass `mark_latest=false` and open a
-  `hardware-test` issue; a maintainer promotes to "Latest" after verifying on real hardware.
+  dispatch overrides) → `publish` (tag a release carrying the scripts + catalog + notes).
+  **Nothing is built**: a release is a snapshot of static repo files, so there's no artifact to
+  gate on a build (the driver is built on the user's host). Auto-builds pass `mark_latest=false`
+  and open a `hardware-test` issue; a maintainer promotes to "Latest" after verifying on real
+  hardware.
 - [`check-releases.yml`](../.github/workflows/check-releases.yml) — daily; watches TrueNAS
   scale-build tags and NVIDIA `latest.txt` (each gated on the artifact actually being
-  published/mirrored), bumps `tracked-versions.json`, and dispatches `release.yml`. Distinct
-  from `check-drivers.yml`, which refreshes the picker catalog.
+  published/mirrored), bumps `tracked-versions.json`, then dispatches **two** workflows for the
+  new combo: `build-sysext.yml` (the smoke build — this is where a version bump gets its
+  `nvidia.raw` compile check, since no PR runs for a tracked-versions bump) and `release.yml`.
+  Distinct from `check-drivers.yml`, which refreshes the picker catalog.
+
+Build validation thus lives in the smoke (`build-sysext.yml`) — on PRs that touch the build
+path, and on version bumps via `check-releases` — never in the release's critical path.
 
 `install-nvidia-driver.sh` sources its tooling + catalog from the newest release matching the
 host's TrueNAS version (or `--release=TAG` to pin), falling back to `main` when none matches —

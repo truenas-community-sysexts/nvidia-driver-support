@@ -6,9 +6,13 @@ name: Release
 # recover/build scripts) + the driver catalog + release notes. It does NOT
 # carry nvidia.raw — NVIDIA's EULA prohibits us redistributing the proprietary
 # userspace, so the driver is always assembled on the user's own TrueNAS host
-# (see README License section). The build-nvidia job still builds + smoke-tests
-# nvidia.raw as a GATE so a broken driver build blocks the release; the artifact
-# is kept on the run page (30 days) for inspection but never published.
+# (see README License section).
+#
+# Nothing is built here. A release publishes only static repo files, so there's
+# no artifact to gate on a build. Build validation lives in the PR smoke
+# (build-sysext.yml) and, on version bumps, in the smoke that check-releases.yml
+# dispatches for the new combo; the driver itself is always built + verified on
+# the user's host.
 #
 # Triggered manually (workflow_dispatch) or by check-releases.yml when TrueNAS
 # or NVIDIA upstream moves (workflow_call, mark_latest=false → awaits hardware
@@ -139,158 +143,13 @@ jobs:
           echo "  Mark latest: ${MARK_LATEST}"
 
   # ───────────────────────────────────────────────────────────────────────
-  # build-nvidia — builds + smoke-tests nvidia.raw as a release GATE.
-  # The artifact is NOT published (EULA); a failed build blocks publish via
-  # `needs:`. Hardcoded ubuntu-24.04 to match the on-host ubuntu:24.04 build.
-  # ───────────────────────────────────────────────────────────────────────
-  build-nvidia:
-    needs: resolve
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install build deps
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            build-essential gcc-14 squashfs-tools kmod xz-utils \
-            bison flex libelf-dev bc rsync libssl-dev pkg-config \
-            pciutils gnupg ca-certificates wget curl patch
-
-      # TrueNAS .update is 1–3 GB; cache per-version. The build script honors
-      # --update-file= to load a pre-staged file from this path.
-      - name: Restore cached TrueNAS .update
-        id: update-cache
-        uses: actions/cache/restore@v5
-        with:
-          path: /tmp/truenas.update
-          key: truenas-update-${{ needs.resolve.outputs.truenas_version }}
-
-      - name: Build nvidia.raw
-        env:
-          NVIDIA_VERSION: ${{ needs.resolve.outputs.nvidia_version }}
-          TRUENAS_VERSION: ${{ needs.resolve.outputs.truenas_version }}
-          NVIDIA_KERNEL_MODULE_TYPE: ${{ needs.resolve.outputs.kernel_module_type }}
-          TRAIN_NAME: ${{ needs.resolve.outputs.train_name }}
-        run: |
-          ARGS=(
-            --nvidia-version="$NVIDIA_VERSION"
-            --truenas-version="$TRUENAS_VERSION"
-            --kernel-module-type="$NVIDIA_KERNEL_MODULE_TYPE"
-            --truenas-codename="$TRAIN_NAME"
-            --out=dist
-          )
-          if [ -f /tmp/truenas.update ]; then
-            ARGS+=(--update-file=/tmp/truenas.update)
-          fi
-          sudo -E scripts/build-nvidia-sysext.sh "${ARGS[@]}"
-
-      - name: Save TrueNAS .update to cache
-        if: steps.update-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        with:
-          path: /tmp/truenas.update
-          key: truenas-update-${{ needs.resolve.outputs.truenas_version }}
-
-      - name: Inspect output
-        run: |
-          ls -la dist/
-          du -h dist/nvidia.raw
-          echo "SHA256: $(cat dist/nvidia.raw.sha256)"
-
-      - name: Smoke-test nvidia.raw contents
-        run: |
-          set -e
-          SMOKE_TMP="$(mktemp -d)"
-          trap 'rm -rf "$SMOKE_TMP"' EXIT
-
-          unsquashfs -d "${SMOKE_TMP}/extract" dist/nvidia.raw >/dev/null
-
-          fail=0
-          require_file() {
-            local rel="$1"
-            if [ ! -e "${SMOKE_TMP}/extract/${rel}" ]; then
-              echo "::error title=smoke-test::missing in nvidia.raw: ${rel}"; fail=1; return
-            fi
-            echo "  ok: ${rel}"
-          }
-          require_elf() {
-            local rel="$1"
-            local path="${SMOKE_TMP}/extract/${rel}"
-            if [ ! -f "$path" ]; then
-              echo "::error title=smoke-test::missing in nvidia.raw: ${rel}"; fail=1; return
-            fi
-            if ! file "$path" | grep -q 'ELF'; then
-              echo "::error title=smoke-test::not an ELF binary: ${rel}"; file "$path"; fail=1; return
-            fi
-            echo "  ok (ELF): ${rel}"
-          }
-
-          echo "=== smoke-test: required paths ==="
-          require_file "usr/lib/extension-release.d/extension-release.nvidia"
-          require_elf  "usr/bin/nvidia-smi"
-
-          for lib in libnvidia-ml libcuda; do
-            so_rel=$(cd "${SMOKE_TMP}/extract" && \
-              find usr/lib -name "${lib}.so.*" -not -type l 2>/dev/null | head -1) || true
-            if [ -z "$so_rel" ]; then
-              echo "::error title=smoke-test::no concrete ${lib}.so.* found in nvidia.raw"; fail=1
-            else
-              require_elf "$so_rel"
-            fi
-          done
-
-          # Kernel module + vermagic consistency.
-          KVER_DIRS=$(cd "${SMOKE_TMP}/extract" && \
-            find usr/lib/modules -mindepth 1 -maxdepth 1 -type d 2>/dev/null \
-            | sed 's|usr/lib/modules/||')
-          KVER_COUNT=$(printf '%s\n' "$KVER_DIRS" | grep -c . || true)
-          if [ "$KVER_COUNT" -ne 1 ]; then
-            echo "::error title=smoke-test::expected exactly one kernel dir under usr/lib/modules, got ${KVER_COUNT}: ${KVER_DIRS}"; fail=1
-          else
-            KVER="$KVER_DIRS"
-            echo "  found kernel-modules dir: ${KVER}"
-            KO_PATH=$(find "${SMOKE_TMP}/extract/usr/lib/modules/${KVER}" \
-              -name 'nvidia.ko' -not -name 'nvidia-*.ko' -type f | head -1)
-            if [ -z "$KO_PATH" ]; then
-              echo "::error title=smoke-test::nvidia.ko not found under usr/lib/modules/${KVER}/"; fail=1
-            else
-              echo "  found nvidia.ko at: ${KO_PATH#"${SMOKE_TMP}/extract/"}"
-              VERMAGIC=$(modinfo -F vermagic "$KO_PATH" 2>/dev/null || true)
-              if [ -z "$VERMAGIC" ]; then
-                echo "::error title=smoke-test::could not read vermagic from nvidia.ko"; fail=1
-              elif ! printf '%s' "$VERMAGIC" | grep -qF "$KVER"; then
-                echo "::error title=smoke-test::nvidia.ko vermagic does not reference KVER (${KVER}); got: ${VERMAGIC}"; fail=1
-              else
-                echo "  ok: nvidia.ko vermagic references ${KVER}"
-              fi
-            fi
-          fi
-
-          if [ "$fail" -ne 0 ]; then
-            echo "::error title=smoke-test::nvidia.raw failed smoke-test — refusing to publish"
-            exit 1
-          fi
-          echo "smoke-test OK"
-
-      - name: Upload nvidia.raw artifact (run-page only, never published)
-        uses: actions/upload-artifact@v7
-        with:
-          name: nvidia-raw
-          path: |
-            dist/nvidia.raw
-            dist/nvidia.raw.sha256
-          if-no-files-found: error
-          retention-days: 30
-
-  # ───────────────────────────────────────────────────────────────────────
   # publish — tag a release carrying the MIT tooling + catalog + notes.
-  # nvidia.raw is intentionally NOT attached (EULA). The build-nvidia smoke
-  # gate above must pass first (`needs:`), so a broken driver build blocks it.
+  # No nvidia.raw is attached (EULA) and nothing is built: a release is just a
+  # versioned snapshot of static repo files. Build validation lives elsewhere
+  # (PR smoke + check-releases' version-bump smoke + the user's on-host build).
   # ───────────────────────────────────────────────────────────────────────
   publish:
-    needs: [resolve, build-nvidia]
+    needs: [resolve]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

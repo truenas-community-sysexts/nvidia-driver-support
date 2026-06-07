@@ -329,6 +329,32 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       # ─────────────────────────────────────────────────────────────────────
+      # Validate the bumped combo with the existing smoke build (build-sysext).
+      # A version bump cuts a release without any PR, so the PR smoke never runs
+      # for the new driver/TrueNAS combo — release.yml no longer builds, so this
+      # is where the new combo gets its nvidia.raw compile check. Runs in
+      # parallel with the release (advisory: the release ships no binary; a smoke
+      # failure is a signal to a maintainer not to promote to "Latest").
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Trigger smoke build for the bumped combo
+        if: steps.truenas.outputs.changed == 'true' || steps.nvidia.outputs.changed == 'true'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'build-sysext.yml',
+              ref: 'main',
+              inputs: {
+                nvidia_version:     '${{ steps.write.outputs.nvidia_driver }}',
+                truenas_version:    '${{ steps.write.outputs.truenas_version }}',
+                kernel_module_type: '${{ steps.write.outputs.kernel_module_type }}'
+              }
+            });
+            console.log('Dispatched build-sysext.yml (smoke) for the bumped combo: NVIDIA ${{ steps.write.outputs.nvidia_driver }} (${{ steps.write.outputs.kernel_module_type }}) on TrueNAS ${{ steps.write.outputs.truenas_version }}');
+
+      # ─────────────────────────────────────────────────────────────────────
       # Trigger the release. mark_latest='false' → produces a release but does
       # not promote it to "Latest"; promotion waits on a successful hardware
       # test (see the auto-created `hardware-test` issue on the new release).
