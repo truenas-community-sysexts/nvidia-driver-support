@@ -118,7 +118,9 @@ versions — a kernel bump just triggers an on-host rebuild. (This is why the ol
   and attach the scripts + catalog. Nothing is built; always promoted to "Latest" (every cut is
   deliberate). Run it manually whenever the tooling or catalog has changed enough to publish.
 - [`check-drivers.yml`](../.github/workflows/check-drivers.yml) — daily; refreshes the picker
-  catalog (`open_latest` + legacy pins) from the NVIDIA index. (There is no auto-release cadence:
+  catalog from the NVIDIA index. `open_latest` is newest-per-major, bounded by `latest.txt`
+  (NVIDIA's blessed production latest — so betas / not-yet-promoted versions never appear) and
+  `.run`-shipping-checked; plus the legacy branch pins. (There is no auto-release cadence:
   releases are cut by hand, since a TrueNAS/NVIDIA bump changes a release's *content* only via
   the catalog, and the tooling is version-agnostic.)
 

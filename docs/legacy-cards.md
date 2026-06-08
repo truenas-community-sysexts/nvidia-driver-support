@@ -59,8 +59,9 @@ sudo install-nvidia-driver.sh \
 # The build forces proprietary modules for a pre-515 version automatically.
 ```
 
-`--custom-run` is also how you install **any** driver the catalog doesn't list — a vGPU /
-NVENC-patched build, a beta, or a version newer than the daily refresh has picked up.
+`--custom-run` (a local file) — alongside `--driver=X.Y.Z` (any version on NVIDIA's CDN) and
+`--run-url=URL` (any `.run` by URL) — is how you install **anything the catalog doesn't list**:
+a vGPU / NVENC-patched build, a beta, or a version above the catalog's `latest.txt` ceiling.
 
 If even a patched `.run` won't compile (very old GCC requirements, removed kernel APIs),
 the card is genuinely past what a modern TrueNAS kernel can host — there's no sysext that

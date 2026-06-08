@@ -10,7 +10,7 @@ recommendation stay current with no manual upkeep.
 ```jsonc
 {
   "open_latest_count": 5,
-  "open_latest": ["610.43.02", "595.71.05", "..."],   // newest N open-capable, newest first
+  "open_latest": ["595.80", "590.48.01", "..."],   // newest per major, capped at N, <= latest.txt
   "branches": {
     "latest":     { "track": "open_latest[0]", "kmod": "open", "support": "supported" },
     "legacy-580": { "version": "580.159.04", "kmod": "proprietary",
@@ -26,8 +26,12 @@ recommendation stay current with no manual upkeep.
 }
 ```
 
-- **`open_latest`** — the newest `open_latest_count` driver versions with major ≥ 515
-  (open-module capable), newest first. `--branch=latest` resolves to `open_latest[0]`.
+- **`open_latest`** — the newest open-module-capable (major ≥ 515) driver **per distinct
+  major/train**, newest first, capped at `open_latest_count`, and **never above NVIDIA's
+  blessed production latest** (`latest.txt`) — so betas / not-yet-promoted versions are
+  excluded, and every entry ships a real `-no-compat32.run`. `--branch=latest` resolves to
+  `open_latest[0]`. (Install anything outside the list — incl. betas — with `--driver=X.Y.Z`
+  or `--run-url=URL`.)
 - **`branches`** — one entry per selectable branch. `version` is a fixed pin (legacy) or
   `track` points into `open_latest`. `kmod` is the default module flavor; `support` is
   `supported` (CI-smoke-tested, builds on the current kernel) or `best-effort`
@@ -42,10 +46,11 @@ recommendation stay current with no manual upkeep.
 [`refresh-catalog.py`](../.github/scripts/refresh-catalog.py) every morning:
 
 1. Scrape the autoindex at `https://download.nvidia.com/XFree86/Linux-x86_64/` for every
-   `X.Y.Z` / `X.Y` version directory.
-2. Recompute `open_latest` (newest N with major ≥ 515) and each legacy branch's `version`
-   (newest release matching that branch's major — NVIDIA still ships occasional security
-   updates to legacy branches).
+   `X.Y.Z` / `X.Y` version directory, and read `latest.txt` (NVIDIA's blessed production latest).
+2. Recompute `open_latest` — newest open-capable version **per major**, capped at N, **never
+   above `latest.txt`**, each verified to ship a `-no-compat32.run` — and each legacy branch's
+   `version` (newest release matching that branch's major; NVIDIA still ships occasional
+   security updates to legacy branches).
 3. Everything else — `chip_map`, `kmod`, `support`, notes — is **preserved verbatim**.
 4. Commit `catalog/driver-catalog.json` if it changed.
 

@@ -25,15 +25,15 @@ The driver-build machinery is a driver-only fork of [`nvidia-mig-support`](https
 
 The picker reads [`catalog/driver-catalog.json`](catalog/driver-catalog.json) (refreshed daily by CI) and detects your GPU via `/sys` (with `lspci` for the exact chip name when the system's PCI database knows it) to recommend a branch:
 
-| Your card (chip family) | Examples | Branch | Modules | Status |
-| --- | --- | --- | --- | --- |
-| Kepler (`GK`) | GTX 660/750 Ti, GT 710/730, Quadro K2200, Tesla K80 | `legacy-470` | proprietary | ✅ supported |
-| Maxwell/Pascal/Volta (`GM`/`GP`/`GV`) | GTX 970/1060/1080, Quadro P400/P2000, Titan V | `legacy-580` | proprietary | ✅ supported |
-| Turing and newer (`TU`/`GA`/`AD`/`GB`) | RTX 20/30/40/50, A-series | `latest` | open | ✅ supported |
-| Fermi (`GF`) | GTX 400/500 | `legacy-390` | proprietary | ⚠️ best-effort¹ |
-| Tesla (`G8x`/`G9x`/`GT2xx`) | 8/9/200-series | `legacy-340` | proprietary | ⚠️ best-effort¹ |
+| Your card | Chip family | Recommended driver | Modules |
+| --- | --- | --- | --- |
+| Turing and newer — RTX 20/30/40/50, A/B-series, Quadro RTX | `TU`/`GA`/`AD`/`GB`/`GH` | `latest` (newest open in the catalog) | open |
+| Maxwell · Pascal · Volta — GTX 900/10-series, Quadro P-series, Titan V | `GM`/`GP`/`GV` | `legacy-580` | proprietary |
+| Kepler — GTX 600/700, Quadro K-series, Tesla K-series | `GK` | `legacy-470` | proprietary |
 
-¹ **best-effort** branches don't cross-compile against TrueNAS's current (6.x) kernel without patches. Bring a patched installer via `--custom-run` — see [docs/legacy-cards.md](docs/legacy-cards.md).
+All three tiers **build against TrueNAS's current 6.x kernel and are smoke-tested in CI** on every change. Kepler/`legacy-470` is EOL upstream and only compiles on 6.x thanks to a vendored community patch set ([`nvidia-470xx-linux-mainline`](https://github.com/joanbm/nvidia-470xx-linux-mainline)) this repo applies for you.
+
+> **Older than Kepler?** **Fermi** (GTX 400/500, `GF` → 390.x) and **Tesla gen 1–2** (8/9/200-series, `G8x`/`G9x`/`GT2xx` → 340.x) are **not supported out of the box** — those EOL installers don't compile against the 6.x kernel and this repo ships **no** patches for them. You can still attempt one by supplying your own community-patched installer via `--custom-run` or `--run-url` (see [docs/legacy-cards.md](docs/legacy-cards.md)); expect to do the legwork.
 
 A card **newer than the host's PCI database** (e.g. a just-released GPU) won't have a chip name to map, but it's still detected as an NVIDIA display device via `/sys` and treated as Turing+ → the latest open driver.
 
@@ -87,10 +87,10 @@ A release is a **tooling + catalog snapshot**, tagged `v<N>` (an auto-incrementi
 The install one-liner pulls the repo's **latest** release for its tooling + catalog (falling back to `main` when none exists). To pin an exact, reproducible snapshot:
 
 ```bash
-curl -fsSL .../scripts/install-nvidia-driver.sh | sudo bash -s -- --release=v7
+curl -fsSL .../scripts/install-nvidia-driver.sh | sudo bash -s -- --release=v5
 ```
 
-`--release` only pins the tooling + catalog snapshot — driver selection is unchanged (card-detect / `--branch` / `--driver` / `--custom-run`).
+`--release` only pins the tooling + catalog snapshot — driver selection is unchanged (card-detect / `--branch` / `--driver` / `--custom-run` / `--run-url`).
 
 ## Prerequisites
 
