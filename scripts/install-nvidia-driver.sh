@@ -39,7 +39,10 @@
 #                         (resolves to the catalog's pinned version for that branch)
 #   --driver=X.Y.Z        an exact NVIDIA driver version (need not be in the catalog)
 #   --custom-run=PATH     a local NVIDIA .run installer (patched/vGPU/etc). Filename
-#                         must be NVIDIA-Linux-x86_64-<X.Y.Z>-no-compat32.run
+#                         must be NVIDIA-Linux-x86_64-<X.Y.Z>[-no-compat32].run
+#   --run-url=URL         download an NVIDIA .run from URL and install it — a beta
+#                         or any non-catalog version. Same filename rule as
+#                         --custom-run. Not tracked or smoke-tested.
 #   --release=TAG         pin a published release (TAG form: v<N>): source the
 #                         install tooling + catalog from that release's assets
 #                         instead of main. Releases are tooling+catalog
@@ -78,6 +81,7 @@ RAW_BASE="https://raw.githubusercontent.com/${REPO}/main"
 BRANCH=""
 DRIVER_VER=""
 CUSTOM_RUN=""
+RUN_URL=""            # --run-url=URL; downloaded then treated like --custom-run
 KMOD_TYPE=""          # empty = auto-derive
 DRIVER_SRC=""
 RELEASE_TAG=""        # --release=TAG (v<N>); empty = auto-resolve repo's latest release
@@ -99,6 +103,7 @@ for arg in "$@"; do
         --branch=*) BRANCH="${arg#*=}" ;;
         --driver=*) DRIVER_VER="${arg#*=}" ;;
         --custom-run=*) CUSTOM_RUN="${arg#*=}" ;;
+        --run-url=*) RUN_URL="${arg#*=}" ;;
         --release=*) RELEASE_TAG="${arg#*=}" ;;
         --kmod=*) KMOD_TYPE="${arg#*=}" ;;
         --driver-sysext=*) DRIVER_SRC="${arg#*=}" ;;
@@ -125,10 +130,11 @@ _src_count=0
 [ -n "$BRANCH" ] && _src_count=$((_src_count+1))
 [ -n "$DRIVER_VER" ] && _src_count=$((_src_count+1))
 [ -n "$CUSTOM_RUN" ] && _src_count=$((_src_count+1))
+[ -n "$RUN_URL" ] && _src_count=$((_src_count+1))
 if [ "$_src_count" -gt 1 ]; then
-    echo "ERROR: pick at most one of --branch / --driver / --custom-run" >&2; exit 2
+    echo "ERROR: pick at most one of --branch / --driver / --custom-run / --run-url" >&2; exit 2
 fi
-if [ -n "$DRIVER_SRC" ] && { [ -n "$CUSTOM_RUN" ] || [ -n "$DRIVER_VER" ] || [ -n "$BRANCH" ]; }; then
+if [ -n "$DRIVER_SRC" ] && { [ -n "$CUSTOM_RUN" ] || [ -n "$RUN_URL" ] || [ -n "$DRIVER_VER" ] || [ -n "$BRANCH" ]; }; then
     echo "ERROR: --driver-sysext installs a pre-built .raw; it can't combine with a driver selector" >&2; exit 2
 fi
 if [ -n "$KMOD_TYPE" ]; then
@@ -245,11 +251,12 @@ fetch_repo_file() {
     curl -fL --retry 3 -o "$dest" "${RAW_BASE}/${main_rel}"
 }
 
-# Driver version out of NVIDIA-Linux-x86_64-<VER>-no-compat32.run.
+# Driver version out of an NVIDIA .run filename. Accepts both the no-compat32
+# variant and the plain .run (the latter for --run-url / arbitrary downloads).
 # VER is X.Y.Z (modern) or X.Y (older legacy, e.g. 390.157).
 parse_nvidia_version_from_run_file() {
     basename "$1" \
-        | sed -nE 's/^NVIDIA-Linux-x86_64-([0-9]+\.[0-9]+(\.[0-9]+)?)-no-compat32\.run$/\1/p'
+        | sed -nE 's/^NVIDIA-Linux-x86_64-([0-9]+\.[0-9]+(\.[0-9]+)?)(-no-compat32)?\.run$/\1/p'
 }
 
 read_raw_driver_version() {
@@ -722,6 +729,27 @@ SELECTED_BRANCH=""
 # selection stays card-detect / --branch / --driver / --custom-run.
 resolve_release_for_install
 
+# --run-url: fetch an arbitrary NVIDIA .run (a beta, or any version hosted
+# anywhere) and treat it exactly like --custom-run from here on. Not tracked or
+# smoke-tested — an explicit user escape hatch for installing anything.
+if [ -n "$RUN_URL" ]; then
+    _run_base=$(basename "${RUN_URL%%\?*}")
+    case "$_run_base" in
+        NVIDIA-Linux-x86_64-*.run) ;;
+        *) echo "ERROR: --run-url must point to an NVIDIA-Linux-x86_64-<X.Y.Z>[-no-compat32].run (got '$_run_base')" >&2; exit 2 ;;
+    esac
+    _run_dir=$(mktemp -d "${TMPDIR:-/tmp}/nvidia-run.XXXXXX")
+    CUSTOM_RUN="${_run_dir}/${_run_base}"
+    if $DRY_RUN; then
+        echo "[dry-run] would: curl -fL -o ${CUSTOM_RUN} ${RUN_URL}"
+        : > "$CUSTOM_RUN"   # placeholder so version-parse + the file check proceed
+    else
+        echo "Downloading custom .run from ${RUN_URL} ..."
+        curl -fL --retry 3 -o "$CUSTOM_RUN" "$RUN_URL" \
+            || { echo "ERROR: failed to download --run-url: $RUN_URL" >&2; exit 1; }
+    fi
+fi
+
 if [ -z "$DRIVER_SRC" ]; then
     load_catalog
 
@@ -729,8 +757,8 @@ if [ -z "$DRIVER_SRC" ]; then
         [ -f "$CUSTOM_RUN" ] || { echo "ERROR: --custom-run not found: $CUSTOM_RUN" >&2; exit 1; }
         TARGET_NV_VER=$(parse_nvidia_version_from_run_file "$CUSTOM_RUN")
         [ -n "$TARGET_NV_VER" ] || {
-            echo "ERROR: cannot parse version from --custom-run filename '$CUSTOM_RUN'" >&2
-            echo "       Expected: NVIDIA-Linux-x86_64-<X.Y.Z>-no-compat32.run" >&2
+            echo "ERROR: cannot parse version from .run filename '$CUSTOM_RUN'" >&2
+            echo "       Expected: NVIDIA-Linux-x86_64-<X.Y.Z>[-no-compat32].run" >&2
             exit 1
         }
         echo "Custom .run: $TARGET_NV_VER ($(basename "$CUSTOM_RUN"))"

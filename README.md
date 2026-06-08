@@ -43,7 +43,7 @@ A card **newer than the host's PCI database** (e.g. a just-released GPU) won't h
 curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-driver-support/main/scripts/install-nvidia-driver.sh | sudo bash -s -- --list
 ```
 
-## The four ways to choose a driver
+## Ways to choose a driver
 
 ```bash
 # 1. Detect my card and recommend (default, interactive)
@@ -53,17 +53,22 @@ sudo install-nvidia-driver.sh
 sudo install-nvidia-driver.sh --branch=legacy-580     # Maxwell/Pascal/Volta
 sudo install-nvidia-driver.sh --branch=legacy-470     # Kepler
 
-# 3. A specific open driver version
-sudo install-nvidia-driver.sh --list                  # see what's available
-sudo install-nvidia-driver.sh --driver=595.71.05
+# 3. A specific driver version (need not be in the catalog — incl. betas /
+#    a version newer than the catalog's "latest")
+sudo install-nvidia-driver.sh --list                  # see the catalog
+sudo install-nvidia-driver.sh --driver=595.80
 sudo install-nvidia-driver.sh --branch=latest         # newest open in the catalog
 
 # 4. A patched / custom .run you already have
 sudo install-nvidia-driver.sh \
-  --custom-run=/mnt/tank/NVIDIA-Linux-x86_64-535.xx-vgpu-kvm.run
+  --custom-run=/mnt/tank/NVIDIA-Linux-x86_64-580.65.06-vgpu.run
+
+# 5. Any .run by URL (betas / versions hosted anywhere)
+sudo install-nvidia-driver.sh \
+  --run-url=https://us.download.nvidia.com/XFree86/Linux-x86_64/610.43.02/NVIDIA-Linux-x86_64-610.43.02-no-compat32.run
 ```
 
-The kernel-module flavor (`--kmod`) is auto-derived — **open** for Turing+, **proprietary** for the legacy branches — and overridable. Open modules are refused on pre-Turing cards (they don't exist there) unless you `--force`.
+The catalog deliberately lists only NVIDIA's blessed production drivers (≤ `latest.txt`); **betas / not-yet-promoted versions install fine by number (`--driver=`) or URL (`--run-url=`)** — they're just not tracked or smoke-tested. The kernel-module flavor (`--kmod`) is auto-derived — **open** for Turing+, **proprietary** for the legacy branches — and overridable. Open modules are refused on pre-Turing cards (they don't exist there) unless you `--force`.
 
 ## What install does
 
@@ -129,7 +134,7 @@ Both repos can swap `nvidia.raw`; to avoid two owners of one file, **this repo i
 
 | Script | What it does |
 | --- | --- |
-| [`install-nvidia-driver.sh`](scripts/install-nvidia-driver.sh) | Picks a driver (card-detect / `--branch` / `--driver` / `--custom-run`), builds `nvidia.raw` on-host, swaps the stock driver, registers the restore PREINIT. `--list`, `--check`, `--dry-run`. |
+| [`install-nvidia-driver.sh`](scripts/install-nvidia-driver.sh) | Picks a driver (card-detect / `--branch` / `--driver` / `--custom-run` / `--run-url`), builds `nvidia.raw` on-host, swaps the stock driver, registers the restore PREINIT. `--list`, `--check`, `--dry-run`. |
 | [`build-nvidia-sysext.sh`](scripts/build-nvidia-sysext.sh) | The driver build itself. Branch-aware installer flags (drops `--kernel-module-type` etc. for pre-515 legacy installers). Runs in CI as a smoke test and inside the on-host container. |
 | [`build-on-host.sh`](scripts/build-on-host.sh) | Wraps the build in `docker run --rm ubuntu:24.04`; caches the TrueNAS `.update` + NVIDIA `.run`. |
 | [`recover-stock-nvidia.sh`](scripts/recover-stock-nvidia.sh) | Extracts stock `nvidia.raw` from the official TrueNAS `.update` → `nvidia-original.raw` (backup before first swap). |
