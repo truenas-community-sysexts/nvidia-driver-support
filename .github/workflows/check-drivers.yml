@@ -19,7 +19,19 @@ jobs:
   refresh:
     runs-on: ubuntu-latest
     steps:
+      # Mint a token from sysext-ci-automation-app (in the default-branch
+      # ruleset bypass list) so the catalog-refresh commit can push to main;
+      # the default GITHUB_TOKEN's github-actions[bot] is not a bypass actor.
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+
       - uses: actions/checkout@v6
+        with:
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Refresh catalog from NVIDIA index
         run: python3 .github/scripts/refresh-catalog.py
