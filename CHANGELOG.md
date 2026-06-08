@@ -4,6 +4,24 @@ All notable changes to `nvidia-driver-support` are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`install-nvidia-driver.sh` now restores the GPU release it does before the swap.** To
+  free the GPU the install stops GPU-bound apps (`app.stop`) and toggles `docker.config.nvidia`
+  off — but it never turned them back on, so after the swap + reboot apps came back with the
+  nvidia toggle stuck off (no GPU) and any stopped apps left down. Ported the hardened
+  drain/rollback pattern from `nvidia-mig-support` (PRs #55/#63/#65):
+  - **Clean finish:** re-enable the docker nvidia toggle (to its *captured prior value*, not a
+    hardcoded `true`) and restart the apps that were stopped, in that order (TrueNAS won't start
+    a container while the toggle is off). Apps recover after the required reboot.
+  - **Abort before the swap:** roll the whole GPU release back (toggle first, then restart the
+    stopped apps, including one caught mid-`app.stop`), so an interrupted install leaves the box
+    as it was found.
+  - **Abort after the swap began:** do NOT restart apps onto a half-swapped driver; print a
+    `recover-stock-nvidia.sh` recovery banner and list the apps left stopped.
+  - Phase-gated by a `SWAP_STARTED` flag; fully inert under `--dry-run`. `uninstall-nvidia-driver.sh`
+    and `recover-stock-nvidia.sh` already had the `restore_state` trap, so no change there.
+
 ### Added
 
 - Initial release. Driver-only NVIDIA sysext for TrueNAS SCALE, forked from the on-host
