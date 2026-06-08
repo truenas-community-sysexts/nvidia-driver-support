@@ -11,27 +11,73 @@ name: Release
 # covers the entire driver x kmod x card matrix.
 #
 # Tag: `v<run_number>` — an auto-incrementing release counter
-# (github.run_number). Nothing is built here; build validation lives in the PR
-# smoke (build-sysext.yml) and the user's on-host build. Manual dispatch only;
-# always promoted to GitHub "Latest" (every release is a deliberate cut).
+# (github.run_number). Manual dispatch only; always promoted to GitHub
+# "Latest" (every release is a deliberate, gated cut).
+#
+# GATING: a release cannot be cut unless
+#   1. the FULL build-sysext smoke matrix compiles green on this commit
+#      (CI passed — proves the tooling + catalog actually build every variant), and
+#   2. the operator attests, via required inputs, that they verified at least
+#      one driver variant ON REAL HARDWARE (CI can't drive a GPU).
+# Both are recorded in the release notes.
 
 on:
   workflow_dispatch:
+    inputs:
+      tested_driver:
+        description: 'Driver build you verified ON HARDWARE (e.g. "580.82.07 open" or "legacy-470")'
+        required: true
+      tested_truenas:
+        description: 'TrueNAS version you tested on (e.g. 25.10.4)'
+        required: true
+      tested_card:
+        description: 'GPU you tested with (e.g. "RTX 4070")'
+        required: true
 
 permissions:
   contents: write
 
 jobs:
+  # Gate 1 (CI passed): run the entire driver build matrix on this commit.
+  # No `with:` => build-sysext builds the full catalog matrix. If any variant
+  # fails to compile, this job fails and `publish` never runs.
+  smoke:
+    uses: ./.github/workflows/build-sysext.yml
+
   publish:
+    needs: smoke
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+
+      # Gate 2 (human-tested): the dispatch inputs are required, but reject
+      # blank/whitespace so the attestation can't be a no-op.
+      - name: Validate hardware-test attestation
+        env:
+          TESTED_DRIVER: ${{ inputs.tested_driver }}
+          TESTED_TRUENAS: ${{ inputs.tested_truenas }}
+          TESTED_CARD: ${{ inputs.tested_card }}
+        run: |
+          set -euo pipefail
+          miss=0
+          for v in TESTED_DRIVER TESTED_TRUENAS TESTED_CARD; do
+            val="${!v}"
+            if [ -z "${val// /}" ]; then
+              echo "::error::${v} must not be blank — a release requires an on-hardware attestation"
+              miss=1
+            fi
+          done
+          [ "$miss" -eq 0 ] || exit 1
+          echo "Attestation: driver='${TESTED_DRIVER}' truenas='${TESTED_TRUENAS}' card='${TESTED_CARD}'"
 
       - name: Write release notes
         env:
           RUN_NUMBER: ${{ github.run_number }}
           COMMIT_SHA: ${{ github.sha }}
           REPO: ${{ github.repository }}
+          TESTED_DRIVER: ${{ inputs.tested_driver }}
+          TESTED_TRUENAS: ${{ inputs.tested_truenas }}
+          TESTED_CARD: ${{ inputs.tested_card }}
         run: |
           set -euo pipefail
           # Build the notes from the catalog + CI smoke target so the "supported"
@@ -54,7 +100,10 @@ jobs:
               "",
               f"- **Open drivers** (Turing+): {open_latest}",
               f"- **Legacy branches**: `{bv('legacy-580')}` (Maxwell/Pascal/Volta), `{bv('legacy-470')}` (Kepler) — proprietary; `{bv('legacy-390')}` (Fermi), `{bv('legacy-340')}` (Tesla) — best-effort/patched",
-              f"- **Validated in CI against**: TrueNAS `{tn}`",
+              f"- **Validated in CI against**: TrueNAS `{tn}` (full build matrix compiled green for this release)",
+              "",
+              "**Hardware-verified for this cut:** driver `%s` on TrueNAS `%s`, card `%s`." % (
+                  os.environ["TESTED_DRIVER"], os.environ["TESTED_TRUENAS"], os.environ["TESTED_CARD"]),
               "",
               "Open vs proprietary modules are auto-derived per card. The TrueNAS version is **not** pinned — the build adapts to the host's running kernel (25.x / 26.x aware), so this release works across TrueNAS versions; a kernel bump just triggers an on-host rebuild.",
               "",

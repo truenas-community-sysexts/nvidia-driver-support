@@ -25,6 +25,21 @@ on:
         description: 'open | proprietary'
         required: false
         default: 'open'
+  # Callable so release.yml can run the full smoke matrix as a publish gate.
+  workflow_call:
+    inputs:
+      nvidia_version:
+        type: string
+        required: false
+        default: ''
+      truenas_version:
+        type: string
+        required: false
+        default: ''
+      kernel_module_type:
+        type: string
+        required: false
+        default: 'open'
 
 permissions:
   contents: read
@@ -47,9 +62,12 @@ jobs:
       - name: Build the version matrix
         id: set
         env:
-          OV_NVIDIA: ${{ github.event.inputs.nvidia_version }}
-          OV_TRUENAS: ${{ github.event.inputs.truenas_version }}
-          OV_KMOD: ${{ github.event.inputs.kernel_module_type }}
+          # `inputs` is populated for both workflow_dispatch and workflow_call;
+          # fall back to github.event.inputs for safety. On pull_request all are
+          # empty, so the full catalog matrix is built (unchanged behavior).
+          OV_NVIDIA: ${{ inputs.nvidia_version || github.event.inputs.nvidia_version }}
+          OV_TRUENAS: ${{ inputs.truenas_version || github.event.inputs.truenas_version }}
+          OV_KMOD: ${{ inputs.kernel_module_type || github.event.inputs.kernel_module_type }}
         run: |
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
