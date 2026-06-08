@@ -687,6 +687,7 @@ build_driver_sysext_on_host() {
         --cache-dir="${PERSIST_DIR}/cache"
         --scripts-dir="$stage_dir"
         --out="$built_raw"
+        --log-dir="${PERSIST_DIR}/logs"
     )
     [ -n "$codename" ] && args+=(--truenas-codename="$codename")
     [ -n "$CUSTOM_RUN" ] && args+=(--run-file="$CUSTOM_RUN")

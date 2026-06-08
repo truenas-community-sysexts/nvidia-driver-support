@@ -24,6 +24,13 @@ All notable changes to `nvidia-driver-support` are documented here.
 
 ### Added
 
+- **Persistent build logs.** The on-host build runs in a `--rm` container, so a failed
+  cross-compile used to take its `/var/log/nvidia-installer.log` with it — leaving nothing to
+  diagnose. Now each build writes two timestamped files to `/mnt/<pool>/.config/nvidia-gpu/logs/`:
+  `build-<ts>.log` (the full container console, via `tee`) and `nvidia-installer-<ts>.log`
+  (lifted out of the container on success *and* failure). Kept to the newest 3 of each; removed
+  by uninstall; printed in the build output and on failure so issue reports can attach them. In
+  CI the installer log also rides along in the build output dir.
 - Initial release. Driver-only NVIDIA sysext for TrueNAS SCALE, forked from the on-host
   build pipeline in [`nvidia-mig-support`](https://github.com/truenas-community-sysexts/nvidia-mig-support).
 - **Driver catalog + card-aware picker** (`install-nvidia-driver.sh`): detects the GPU via

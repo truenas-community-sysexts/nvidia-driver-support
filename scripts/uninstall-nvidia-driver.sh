@@ -159,8 +159,8 @@ fi
 # ── Cleanup persist (nvidia-original.raw always kept) ──
 if ! $KEEP_PERSIST && [ -n "$PERSIST_DIR" ]; then
     rm -f "$PERSIST_DIR/nvidia.raw" "$PERSIST_DIR/nvidia-preinit-driver.sh"
-    rm -rf "$PERSIST_DIR/build" "$PERSIST_DIR/scripts"
-    echo "Removed custom nvidia.raw, PREINIT helper, and build/scripts/ from $PERSIST_DIR"
+    rm -rf "$PERSIST_DIR/build" "$PERSIST_DIR/scripts" "$PERSIST_DIR/logs"
+    echo "Removed custom nvidia.raw, PREINIT helper, and build/scripts/logs/ from $PERSIST_DIR"
     if [ -d "$PERSIST_DIR/cache" ]; then
         if $KEEP_CACHE; then
             echo "  ($PERSIST_DIR/cache retained: $(du -sh "$PERSIST_DIR/cache" 2>/dev/null | cut -f1 || echo '?') — --keep-cache)"
