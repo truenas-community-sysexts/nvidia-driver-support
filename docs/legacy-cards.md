@@ -14,8 +14,8 @@ does.
 | Pascal | `GP` | GTX 1050/1060/1070/1080, Quadro P400/P2000, Tesla P40 | **580.x** | proprietary | ✅ yes |
 | Volta | `GV` | Titan V, Tesla V100 | **580.x** | proprietary | ✅ yes |
 | Turing+ | `TU`/`GA`/`AD`/`GB`/`GH` | RTX 20/30/40/50, A/L-series | current (590+) | open | ✅ yes |
-| Fermi | `GF` | GTX 400/500, Quadro 2000 | **390.x** | proprietary | ⚠️ no (patched `.run`) |
-| Tesla (gen 1–2) | `G8x`/`G9x`/`GT2xx` | 8/9/200-series, Quadro FX | **340.x** | proprietary | ⚠️ no (patched `.run`) |
+| Fermi | `GF` | GTX 400/500, Quadro 2000 | 390.x *(no branch)* | proprietary | ⚠️ no (patched `.run`) |
+| Tesla (gen 1–2) | `G8x`/`G9x`/`GT2xx` | 8/9/200-series, Quadro FX | 340.x *(no branch)* | proprietary | ⚠️ no (patched `.run`) |
 
 Sources: NVIDIA's [legacy GPU release timeframes](https://nvidia.custhelp.com/app/answers/detail/a_id/3142/)
 and the [580 = last for Maxwell/Pascal/Volta announcement](https://nvidia.custhelp.com/app/answers/detail/a_id/5676/).
@@ -29,16 +29,18 @@ detected pre-Turing card the install refuses (the modules literally don't exist)
 `--force`. The build script also drops `--kernel-module-type` entirely for installers
 older than 515, which predate the open/proprietary split.
 
-## Why 470 + 580 are "supported" but 390 + 340 are "best-effort"
+## Why 470 + 580 are catalog branches but 390 + 340 aren't
 
 The on-host build cross-compiles `nvidia.ko` against TrueNAS's running kernel (6.x).
 
 - **470.x** and **580.x** installers compile cleanly against 6.x kernels — these are the
-  branches CI smoke-tests on every change, so they're the ones we stand behind.
+  branches CI smoke-tests on every change, so they're the ones we stand behind, and they're
+  the only legacy entries in the catalog / picker.
 - **390.x** and **340.x** predate the 6.x kernel API. Their stock installers fail to build
-  (missing/renamed kernel symbols, ancient GCC assumptions). They're in the catalog so the
-  picker can *recommend* them for Fermi/Tesla cards, but the stock build will almost
-  certainly fail.
+  (missing/renamed kernel symbols, ancient GCC assumptions), so they are **not** catalog
+  branches — the picker won't offer or recommend them. A detected Fermi/Tesla card is flagged
+  with no automatic recommendation. To use one, bring a patched `.run` (below) via
+  `--custom-run` / `--run-url`.
 
 ## Making a best-effort card work: patched `.run`
 

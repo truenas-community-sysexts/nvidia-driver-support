@@ -35,8 +35,10 @@
 # recommended branch for the interactive default.
 #
 # Flags:
-#   --branch=NAME         latest | legacy-470 | legacy-580 | legacy-390 | legacy-340
-#                         (resolves to the catalog's pinned version for that branch)
+#   --branch=NAME         latest | legacy-580 | legacy-470
+#                         (resolves to the catalog's pinned version for that branch).
+#                         Fermi/Tesla (390.x/340.x) are not branches — they don't
+#                         build unpatched; use --custom-run/--run-url with a patched .run.
 #   --driver=X.Y.Z        an exact NVIDIA driver version (need not be in the catalog)
 #   --custom-run=PATH     a local NVIDIA .run installer (patched/vGPU/etc). Filename
 #                         must be NVIDIA-Linux-x86_64-<X.Y.Z>[-no-compat32].run
@@ -392,6 +394,7 @@ DETECTED_NAME=""
 DETECTED_BRANCH=""
 DETECTED_DEVICE_ID=""
 DETECTED_UNCLASSIFIED=false
+DETECTED_LEGACY_UNSUPPORTED=false   # Fermi/Tesla: recognized, but no catalog branch
 # Detect an installed NVIDIA GPU and recommend a branch.
 #
 # Presence comes from /sys (vendor 0x10de + display class 0x03xx), so it works
@@ -429,9 +432,18 @@ detect_gpu() {
 
     [ -n "$DETECTED_CODENAME" ] && DETECTED_BRANCH=$(catalog_chip_branch "$DETECTED_CODENAME")
     if [ -z "$DETECTED_BRANCH" ]; then
-        # Present but unclassifiable → newest open driver is the safe default.
-        DETECTED_BRANCH="latest"
-        DETECTED_UNCLASSIFIED=true
+        case "$DETECTED_CODENAME" in
+            GF*|G8*|G9*|GT2*)
+                # Fermi/Tesla (G8x/G9x/GT2xx): recognized, but no longer a
+                # catalog branch — those drivers don't cross-compile against
+                # modern kernels unpatched. No recommendation; the user must
+                # bring a patched .run via --custom-run / --run-url.
+                DETECTED_LEGACY_UNSUPPORTED=true ;;
+            *)
+                # Present but unclassifiable (newer than the PCI DB) → newest open.
+                DETECTED_BRANCH="latest"
+                DETECTED_UNCLASSIFIED=true ;;
+        esac
     fi
     return 0
 }
@@ -518,7 +530,7 @@ run_interactive_picker() {
     echo "  (or type an exact X.Y.Z version)"
 
     local prompt reply
-    if [ -n "$def_idx" ]; then prompt="Selection [${def_idx}]: "
+    if [ -n "$def_idx" ]; then prompt="Selection [${def_idx}] (press Enter for the recommended default): "
     else prompt="Selection (number or X.Y.Z): "; fi
     printf "%s" "$prompt"
     read -r reply </dev/tty || true
@@ -557,7 +569,7 @@ prompt_kmod() {
             echo "  1) open"
             echo "  2) proprietary  <- ${reason}"
         fi
-        printf "Modules [%d]: " "$def_num"
+        printf "Modules [%d] (press Enter for the recommended default): " "$def_num"
     } >&2
     read -r reply </dev/tty || true
     [ -z "$reply" ] && reply="$def_num"
@@ -875,7 +887,13 @@ if [ -z "$DRIVER_SRC" ]; then
         # Interactive: detect card, recommend a branch.
         echo "Detecting NVIDIA GPU..."
         if detect_gpu; then
-            if $DETECTED_UNCLASSIFIED; then
+            if $DETECTED_LEGACY_UNSUPPORTED; then
+                echo "  Found: ${DETECTED_NAME:-$DETECTED_CODENAME} (chip ${DETECTED_CODENAME})"
+                echo "  This is a Fermi/Tesla-era card. Its last driver (390.x / 340.x) does NOT"
+                echo "  cross-compile against TrueNAS's modern kernel, so there's no catalog branch."
+                echo "  To use it, supply a patched installer:  --custom-run=PATH  or  --run-url=URL"
+                echo "  (see docs/legacy-cards.md). No driver is recommended automatically."
+            elif $DETECTED_UNCLASSIFIED; then
                 echo "  Found: ${DETECTED_NAME} (10de:${DETECTED_DEVICE_ID})"
                 echo "  This chip isn't in the system's PCI ID database (it's newer than the DB),"
                 echo "  so defaulting to the latest OPEN driver — correct for Turing and newer."
@@ -883,7 +901,7 @@ if [ -z "$DRIVER_SRC" ]; then
             else
                 echo "  Found: ${DETECTED_NAME:-$DETECTED_CODENAME} (chip ${DETECTED_CODENAME})"
             fi
-            echo "  Recommended: --branch=${DETECTED_BRANCH}"
+            [ -n "$DETECTED_BRANCH" ] && echo "  Recommended: --branch=${DETECTED_BRANCH}"
             SELECTED_BRANCH="$DETECTED_BRANCH"
         else
             echo "  No NVIDIA GPU detected (no 0x10de display device under /sys)."
@@ -1298,8 +1316,7 @@ Run: sudo reboot
 After reboot, confirm:
   sudo nvidia-smi --query-gpu=driver_version --format=csv,noheader
 
-To also enable MIG (Blackwell), install nvidia-mig-support in its DEFAULT
-mode now — it layers on top of this driver. To revert to stock later:
+To revert to stock later:
   sudo ${PERSIST_DIR}/scripts/uninstall-nvidia-driver.sh
 EOF
 else

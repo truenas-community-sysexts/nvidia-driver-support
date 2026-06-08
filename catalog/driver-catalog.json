@@ -35,26 +35,6 @@
       ],
       "support": "supported",
       "note": "Last branch for Kepler. Builds against modern 6.x kernels."
-    },
-    "legacy-390": {
-      "version": "390.157",
-      "kmod": "proprietary",
-      "chips": [
-        "GF"
-      ],
-      "support": "best-effort",
-      "note": "Last branch for Fermi. Does NOT cross-compile against TrueNAS 6.x kernels unpatched \u2014 bring a patched .run via --custom-run."
-    },
-    "legacy-340": {
-      "version": "340.108",
-      "kmod": "proprietary",
-      "chips": [
-        "G8",
-        "G9",
-        "GT2"
-      ],
-      "support": "best-effort",
-      "note": "Last branch for Tesla G8x/G9x/GT2xx. Does NOT cross-compile against TrueNAS 6.x kernels unpatched \u2014 bring a patched .run via --custom-run."
     }
   },
   "chip_map": {
@@ -62,10 +42,6 @@
     "GM": "legacy-580",
     "GP": "legacy-580",
     "GV": "legacy-580",
-    "GF": "legacy-390",
-    "G8": "legacy-340",
-    "G9": "legacy-340",
-    "GT2": "legacy-340",
     "TU": "latest",
     "GA": "latest",
     "AD": "latest",

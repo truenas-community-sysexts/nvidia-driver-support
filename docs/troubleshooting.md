@@ -27,11 +27,11 @@ curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-dr
 sudo /mnt/<pool>/.config/nvidia-gpu/scripts/build-on-host.sh --help
 ```
 
-## The on-host build fails for a legacy branch
+## The on-host build fails for a Fermi/Tesla card (390.x / 340.x)
 
-If you chose `legacy-390` / `legacy-340`, the stock installer doesn't compile against
-TrueNAS's 6.x kernel — this is the documented **best-effort** case. Supply a patched
-installer:
+Fermi (`GF`) and Tesla gen 1–2 (`G8x`/`G9x`/`GT2xx`) cards have no catalog branch: their
+stock 390.x/340.x installers don't compile against TrueNAS's 6.x kernel. A detected such
+card gets no recommendation. To use one, supply a patched installer:
 
 ```bash
 sudo install-nvidia-driver.sh --custom-run=/path/to/NVIDIA-Linux-x86_64-<VER>-no-compat32.run
