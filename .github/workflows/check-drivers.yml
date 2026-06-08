@@ -14,6 +14,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   refresh:
@@ -40,9 +41,11 @@ jobs:
         run: .github/scripts/validate-catalog.sh
 
       - name: Commit if changed
+        id: commit
         run: |
           if git diff --quiet -- catalog/driver-catalog.json; then
             echo "No catalog change."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           git config user.name  "github-actions[bot]"
@@ -50,3 +53,25 @@ jobs:
           git add catalog/driver-catalog.json
           git commit -m "catalog: refresh NVIDIA driver versions [skip ci]"
           git push
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      # New drivers landed in the catalog → cut a gated release: release.yml
+      # runs the full build matrix (CI), and on green publishes a PRERELEASE +
+      # opens a hardware-test issue. Closing that issue promotes it to Latest
+      # (promote.yml). Same auto-update shape as the other repos' check-*.
+      # (The catalog commit carries [skip ci], so this explicit dispatch is the
+      # only thing that runs — via the app token, which has actions:write.)
+      - name: Cut a gated prerelease for the new drivers
+        if: steps.commit.outputs.changed == 'true'
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'release.yml',
+              ref: 'main',
+              inputs: { mark_latest: 'false' }
+            });
+            console.log('Dispatched release.yml (mark_latest=false) after catalog bump');
