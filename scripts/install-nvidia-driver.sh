@@ -1059,13 +1059,82 @@ USR_WAS_WRITABLE=0
 USR_DATASET=""
 DRIVER_TMP=""
 PREINIT_DRY_TMP=""
+
+# GPU-release rollback state (mirrors install-mig-sysext.sh's hardened drain).
+# The install frees the GPU before the swap — stops GPU-bound apps and toggles
+# docker's nvidia runtime off. On a CLEAN finish we restore both (there's no
+# post-reboot configure-mig here to do it, unlike the MIG flow). On an ABORT we
+# roll them back so an interrupted install never leaves apps down / GPU off.
+DOCKER_NVIDIA_DISABLED=0     # 1 once we toggled docker.nvidia off
+DOCKER_NVIDIA_PRIOR=""       # docker.config.nvidia value captured before we touched it
+SWAP_STARTED=0               # 1 once the sysext unmerge / driver swap has begun
+STOPPED_APPS=""              # newline list of apps we successfully app.stop'd
+STOPPING_APP=""              # app currently mid app.stop (set before, cleared after)
+
+# Restore the docker nvidia toggle to its captured prior value. No-op if we
+# never disabled it. Default to true if we somehow never read the prior value.
+restore_docker_nvidia() {
+    [ "$DOCKER_NVIDIA_DISABLED" = "1" ] || return 0
+    local want="${DOCKER_NVIDIA_PRIOR:-true}"
+    midclt call docker.update "{\"nvidia\": ${want}}" >/dev/null 2>&1 \
+        && echo "  Restored docker.config.nvidia=${want}" >&2 \
+        || echo "  WARN: could not restore docker.config.nvidia (set it manually)" >&2
+    DOCKER_NVIDIA_DISABLED=0
+}
+
+# Restart every app we stopped (STOPPED_APPS) plus any app caught mid-stop
+# (STOPPING_APP). Must run AFTER restore_docker_nvidia — TrueNAS won't start a
+# container while the nvidia toggle is off.
+restart_stopped_apps() {
+    local app
+    while IFS= read -r app; do
+        [ -n "$app" ] || continue
+        midclt call -j app.start "$app" >/dev/null 2>&1 \
+            && echo "  Restarted $app" >&2 \
+            || echo "  WARN: could not restart $app — start it from the Apps UI" >&2
+    done <<< "$(printf '%s\n%s\n' "$STOPPED_APPS" "$STOPPING_APP")"
+}
+
 cleanup_tmp() {
+    local rc=$?
+    # Always put /usr back read-only if we left it writable.
     if [ "$USR_WAS_WRITABLE" = "1" ] && [ -n "$USR_DATASET" ]; then
         zfs set readonly=on "$USR_DATASET" 2>/dev/null || true
         USR_WAS_WRITABLE=0
     fi
     [ -n "${DRIVER_TMP:-}" ] && rm -f "$DRIVER_TMP"
     [ -n "${PREINIT_DRY_TMP:-}" ] && rm -f "$PREINIT_DRY_TMP"
+
+    # Abnormal exit only — the clean-success path restores the GPU release
+    # itself (in order, with its own messaging). Dry-run never sets the flags.
+    if [ "$rc" -ne 0 ]; then
+        if [ "$SWAP_STARTED" = "0" ]; then
+            # Pre-swap: the stock/old driver is still intact and merged, so a
+            # full rollback is safe. Toggle FIRST (apps won't start while off),
+            # then restart everything we stopped.
+            if [ "$DOCKER_NVIDIA_DISABLED" = "1" ] || [ -n "${STOPPED_APPS}${STOPPING_APP}" ]; then
+                echo "" >&2
+                echo "Install aborted before the driver swap — rolling back the GPU release..." >&2
+                restore_docker_nvidia
+                restart_stopped_apps
+            fi
+        else
+            # Post-swap: the live driver may be half-swapped. Do NOT restart
+            # apps onto it or re-enable the toggle; point at recovery instead.
+            echo "" >&2
+            echo "Install aborted AFTER the driver swap began — NOT restarting apps onto a" >&2
+            echo "possibly half-swapped driver. Recover the stock driver first:" >&2
+            if [ -x "${PERSIST_DIR:-}/scripts/recover-stock-nvidia.sh" ]; then
+                echo "  sudo ${PERSIST_DIR}/scripts/recover-stock-nvidia.sh --install && sudo reboot" >&2
+            else
+                echo "  re-run the installer, or restore ${LIVE_NVIDIA}.bak, then reboot" >&2
+            fi
+            if [ -n "${STOPPED_APPS}${STOPPING_APP}" ]; then
+                echo "  Apps left stopped (start them after recovery):" >&2
+                printf '%s\n%s\n' "$STOPPED_APPS" "$STOPPING_APP" | sed '/^$/d;s/^/    /' >&2
+            fi
+        fi
+    fi
 }
 trap cleanup_tmp EXIT INT TERM
 
@@ -1179,15 +1248,24 @@ except Exception:
             [ -z "$line" ] && continue
             IFS='|' read -r app state <<<"$line"
             if [ "$state" != "RUNNING" ]; then echo "  $app: state=$state — no container to stop"; continue; fi
+            # Mark in-flight before the blocking call so an abort mid-stop still
+            # restarts it on rollback; record only on success (a cleanly-failed
+            # stop left the app up, so it needs no restart).
+            STOPPING_APP="$app"
             if run_with_elapsed_capture "  Stopping $app" midclt call -j app.stop "$app"; then
                 echo "  Stopping $app... OK (${ELAPSED}s)"
+                STOPPED_APPS+="$app"$'\n'
             else
                 echo "  Stopping $app... WARN (${ELAPSED}s): $CAPTURED_OUT"
             fi
+            STOPPING_APP=""
         done <<<"$GPU_APPS_INFO"
     fi
     echo "  Disabling nvidia toolkit for docker (belt-and-suspenders)..."
+    DOCKER_NVIDIA_PRIOR=$(midclt call docker.config 2>/dev/null \
+        | python3 -c "import sys,json; print('true' if json.load(sys.stdin).get('nvidia') else 'false')" 2>/dev/null || echo true)
     midclt call docker.update '{"nvidia": false}' >/dev/null \
+        && DOCKER_NVIDIA_DISABLED=1 \
         || echo "  WARN: docker.update returned an error — middleware may be flapping"
     printf "  Waiting for GPU compute clients to release... 0s/30s"
     for attempt in $(seq 1 10); do
@@ -1201,13 +1279,20 @@ except Exception:
     fi
 else
     echo "  nvidia-smi missing; toggling docker.nvidia=false only (no drain check)"
-    midclt call docker.update '{"nvidia": false}' >/dev/null || echo "  WARN: docker.update returned an error"
+    DOCKER_NVIDIA_PRIOR=$(midclt call docker.config 2>/dev/null \
+        | python3 -c "import sys,json; print('true' if json.load(sys.stdin).get('nvidia') else 'false')" 2>/dev/null || echo true)
+    midclt call docker.update '{"nvidia": false}' >/dev/null \
+        && DOCKER_NVIDIA_DISABLED=1 \
+        || echo "  WARN: docker.update returned an error"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────
 # Swap nvidia.raw on read-only /usr.
 # ─────────────────────────────────────────────────────────────────────────
 echo "Unmerging sysext..."
+# Past this point the live driver is being replaced — an abort can no longer
+# safely restart apps onto it (see cleanup_tmp's post-swap branch).
+$DRY_RUN || SWAP_STARTED=1
 if_real systemd-sysext unmerge
 
 USR_DATASET=$(zfs list -H -o name /usr 2>/dev/null)
@@ -1298,6 +1383,18 @@ fi
 
 echo ""
 if $OK; then
+    # Restore the GPU release we did before the swap: re-enable the docker
+    # nvidia toggle (to its prior value) and restart the apps we stopped. Order
+    # matters — the toggle must be back on before app.start, or TrueNAS no-ops
+    # the start. There's no post-reboot configure-mig here to do this, so the
+    # installer owns it. The apps come up healthy after the reboot below; until
+    # then they'll show the same driver/library mismatch nvidia-smi does.
+    if [ "$DOCKER_NVIDIA_DISABLED" = "1" ] || [ -n "$STOPPED_APPS" ]; then
+        echo "Restoring GPU access (docker nvidia toggle + stopped apps)..."
+        restore_docker_nvidia
+        restart_stopped_apps
+        echo ""
+    fi
     cat <<EOF
 === Driver install complete — REBOOT REQUIRED ===
 
@@ -1305,10 +1402,11 @@ The kernel modules currently loaded are the PREVIOUS driver's; userspace
 libraries are now the new driver's (${NEW_DRIVER_VER:-$TARGET_NV_VER}). Until you reboot:
 
   nvidia-smi will report "Driver/library version mismatch"
+  any GPU apps just restarted will mismatch too — reboot promptly
 
 After reboot:
   - new kernel modules load from /usr/lib/modules/<kernel>/
-  - userspace libs match
+  - userspace libs match; restarted GPU apps recover
   - the PREINIT restores this driver after any future TrueNAS update
 
 Run: sudo reboot
