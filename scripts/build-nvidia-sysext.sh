@@ -66,6 +66,9 @@ fi
 [ -n "$NVIDIA_VERSION" ] || { echo "ERROR: --nvidia-version=X.Y.Z required" >&2; exit 1; }
 [ -n "$TRUENAS_VERSION" ] || { echo "ERROR: --truenas-version=X.Y.Z required" >&2; exit 1; }
 
+# Absolute, captured BEFORE any chdir (Phase 3 cds into $BUILD_DIR) so paths
+# next to this script still resolve in later phases (e.g. Phase 5b bundling).
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${OUT_DIR:-${REPO_ROOT}/dist}"
 mkdir -p "$OUT_DIR"
@@ -619,7 +622,7 @@ ok "Main nvidia.ko at: $MAIN_KO"
 # may still want to uninstall — so the two copies are complementary. (bash reads
 # the script into memory before it unmerges its own sysext, so the on-PATH copy
 # can safely tear down the very sysext it lives in.)
-UNINSTALL_SRC="$(dirname "${BASH_SOURCE[0]}")/uninstall-nvidia-driver.sh"
+UNINSTALL_SRC="${SELF_DIR}/uninstall-nvidia-driver.sh"
 if [ -f "$UNINSTALL_SRC" ]; then
     mkdir -p "$STAGING_DIR/usr/bin"
     cp "$UNINSTALL_SRC" "$STAGING_DIR/usr/bin/uninstall-nvidia-driver"
