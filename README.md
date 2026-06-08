@@ -19,7 +19,6 @@ TrueNAS SCALE ships exactly one NVIDIA driver, and recent releases moved to a 57
 - **Maxwell / Pascal / Volta** (GTX 900/10-series, Quadro P400/P2000, Titan V) — last driver is the **580** branch
 - Plus anyone who wants a **specific** open driver version, or a **patched** `.run` (vGPU-unlock, NVENC patch, hand-built).
 
-The driver-build machinery is a driver-only fork of [`nvidia-mig-support`](https://github.com/truenas-community-sysexts/nvidia-mig-support)'s on-host build, wrapped in a **driver catalog + card-aware picker**.
 
 ## How a card maps to a driver
 
@@ -126,10 +125,10 @@ curl -fsSL .../scripts/install-nvidia-driver.sh | sudo bash -s -- --rebuild
 
 ## Coexistence with `nvidia-mig-support`
 
-Both repos can swap `nvidia.raw`; to avoid two owners of one file, **this repo is the driver-swap owner**. They share `/mnt/<pool>/.config/nvidia-gpu/` (one `nvidia-original.raw`, one `cache/`, one driver PREINIT).
+This sysext is the base package for nvidia drivers.  If you need Multi-Instance Graphics (MIG) with a supported workstation or server card please install the MIG sysext.
 
-- **Driver only** → this repo.
-- **Driver + MIG** → install this repo first, then `nvidia-mig-support` in its **default** mode (it layers MIG on top of whatever driver is present). Do **not** pass `nvidia-mig-support --with-driver` alongside this — that path is its own driver-swap owner and would fight this one.
+- **Driver only** → this repo - it should be installed first.
+- **Driver + MIG** → afer installing this sysext first and rebooting you then install  `nvidia-mig-support`
 
 ## Scripts reference
 
