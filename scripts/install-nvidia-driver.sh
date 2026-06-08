@@ -1316,8 +1316,7 @@ Run: sudo reboot
 After reboot, confirm:
   sudo nvidia-smi --query-gpu=driver_version --format=csv,noheader
 
-To also enable MIG (Blackwell), install nvidia-mig-support in its DEFAULT
-mode now — it layers on top of this driver. To revert to stock later:
+To revert to stock later:
   sudo ${PERSIST_DIR}/scripts/uninstall-nvidia-driver.sh
 EOF
 else
