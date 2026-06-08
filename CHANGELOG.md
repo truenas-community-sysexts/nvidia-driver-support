@@ -12,7 +12,7 @@ All notable changes to `nvidia-driver-support` are documented here.
   `/sys` (vendor `0x10de` + display class), names the chip via `lspci` when the host's PCI
   database knows it, and recommends a branch — a card newer than that database (e.g. a
   just-released Blackwell) is treated as Turing+ → latest/open. Selectors: `--branch`
-  (legacy-470/580/390/340 / latest), `--driver=X.Y.Z`, `--custom-run=PATH`, `--run-url=URL`,
+  (legacy-580/470 / latest), `--driver=X.Y.Z`, `--custom-run=PATH`, `--run-url=URL`,
   `--release=v<N>`; plus `--list`, `--check`, `--dry-run`, `--kmod`. `--list` and the
   interactive picker show the full open-train matrix and each branch's module flavor.
   Run with no selector, the picker is a **numbered menu** (card-detected row
@@ -21,12 +21,14 @@ All notable changes to `nvidia-driver-support` are documented here.
   card's recommendation. `--kmod` still overrides non-interactively.
 - **Legacy-branch support**: 470.x (Kepler) builds against modern (6.x) kernels via the
   vendored [`nvidia-470xx-linux-mainline`](https://github.com/joanbm/nvidia-470xx-linux-mainline)
-  patch set (git submodule under `third_party/`); 580.x (Maxwell/Pascal/Volta) supported;
-  390.x (Fermi) and 340.x (Tesla) best-effort with a patched-`.run` escape hatch.
+  patch set (git submodule under `third_party/`); 580.x (Maxwell/Pascal/Volta) supported.
+  Fermi (390.x) and Tesla gen 1–2 (340.x) are **not** catalog branches — they don't build
+  against 6.x kernels unpatched; a detected such card gets no recommendation and must use a
+  patched `.run` via `--custom-run` / `--run-url`.
 - **Branch-aware installer flags** in `build-nvidia-sysext.sh`: every non-essential flag is
-  gated on the installer advertising it in `--help` (pre-515 legacy installers reject
-  `--kernel-module-type`, `--no-rebuild-initramfs`, etc.); forces proprietary where no open
-  path exists.
+  gated on the installer advertising it in `--advanced-options` (pre-515 legacy installers
+  reject `--kernel-module-type`, `--no-rebuild-initramfs`, etc.); forces proprietary where no
+  open path exists.
 - **Auto-kmod**: open for Turing+, proprietary for legacy; refuses open on pre-Turing cards.
 - **Catalog** (`catalog/driver-catalog.json`): `open_latest` is the newest open driver per
   major/train, capped at `open_latest_count` and **never above NVIDIA's `latest.txt`** (so

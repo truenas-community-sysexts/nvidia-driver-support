@@ -16,11 +16,7 @@ recommendation stay current with no manual upkeep.
     "legacy-580": { "version": "580.159.04", "kmod": "proprietary",
                     "chips": ["GM","GP","GV"], "support": "supported" },
     "legacy-470": { "version": "470.256.02", "kmod": "proprietary",
-                    "chips": ["GK"], "support": "supported" },
-    "legacy-390": { "version": "390.157", "kmod": "proprietary",
-                    "chips": ["GF"], "support": "best-effort" },
-    "legacy-340": { "version": "340.108", "kmod": "proprietary",
-                    "chips": ["G8","G9","GT2"], "support": "best-effort" }
+                    "chips": ["GK"], "support": "supported" }
   },
   "chip_map": { "GK":"legacy-470", "GP":"legacy-580", "TU":"latest", "...": "..." }
 }
@@ -36,9 +32,11 @@ recommendation stay current with no manual upkeep.
   `track` points into `open_latest`. `kmod` is the default module flavor; `support` is
   `supported` (CI-smoke-tested, builds on the current kernel) or `best-effort`
   (needs a patched `.run`).
-- **`chip_map`** — NVIDIA chip prefix → branch. The picker tries the longest prefix first
-  (`GT2` before `GP` before `G9`), so Tesla `GT218` maps to `legacy-340`, not a `G`-prefix
-  collision.
+- **`chip_map`** — NVIDIA chip prefix → branch. The picker tries the longest prefix first,
+  so a more specific multi-letter prefix wins over a shorter one that would also match. Only
+  branches defined in `branches` may appear here (the validator enforces it). Fermi/Tesla
+  (`GF`/`G8`/`G9`/`GT2`) are intentionally absent — those have no buildable branch; a detected
+  such card gets no recommendation and must use `--custom-run` / `--run-url`.
 
 ## Daily refresh
 
