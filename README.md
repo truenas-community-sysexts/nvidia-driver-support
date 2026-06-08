@@ -101,13 +101,14 @@ curl -fsSL .../scripts/install-nvidia-driver.sh | sudo bash -s -- --release=v7
 ```bash
 sudo install-nvidia-driver.sh --check     # read-only probe of an existing install
 sudo install-nvidia-driver.sh --dry-run --branch=legacy-580   # walk the steps, mutate nothing
-sudo /mnt/<pool>/.config/nvidia-gpu/scripts/uninstall-nvidia-driver.sh   # revert to stock (reboot)
+sudo uninstall-nvidia-driver               # revert to stock (reboot) — bundled on PATH in the sysext
 ```
 
-`--check` and `--dry-run` are mutually exclusive. `--dry-run` resolves the version, validates URLs, and prints every mutation as `[dry-run] would: …` without touching the system. The uninstaller (and `recover-stock-nvidia.sh`, build helpers) are staged into `/mnt/<pool>/.config/nvidia-gpu/scripts/` on install, so teardown needs no network. Fallback if the sysext is unmerged:
+`--check` and `--dry-run` are mutually exclusive. `--dry-run` resolves the version, validates URLs, and prints every mutation as `[dry-run] would: …` without touching the system. The uninstaller is **bundled into the sysext** at `/usr/bin/uninstall-nvidia-driver` (on PATH whenever the custom driver is merged), and a copy is also staged to `/mnt/<pool>/.config/nvidia-gpu/scripts/` (along with `recover-stock-nvidia.sh` + build helpers) — that copy survives even when the sysext is unmerged or restored to stock, so teardown always works. Equivalents:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-driver-support/main/scripts/uninstall-nvidia-driver.sh | sudo bash
+sudo /mnt/<pool>/.config/nvidia-gpu/scripts/uninstall-nvidia-driver.sh   # persisted copy (survives unmerge)
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-driver-support/main/scripts/uninstall-nvidia-driver.sh | sudo bash   # last resort (no local copy)
 ```
 
 ## After a TrueNAS update
