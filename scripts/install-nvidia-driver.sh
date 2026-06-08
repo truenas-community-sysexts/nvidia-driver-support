@@ -51,7 +51,9 @@
 #                         repo's latest release is used (falling back to main).
 #   --kmod=open|proprietary
 #                         kernel-module flavor. Auto-derived from the branch/version
-#                         if omitted (open for Turing+, proprietary for legacy).
+#                         if omitted (open for Turing+, proprietary for legacy). When
+#                         run interactively without this flag, the picker offers the
+#                         choice for drivers that ship both (515+).
 #   --driver-sysext=PATH  install a pre-built nvidia.raw (skips the on-host build)
 #   --rebuild             ignore any cached nvidia.raw and rebuild from scratch
 #   --list                print the driver catalog and exit
@@ -97,6 +99,7 @@ ASSUME_YES=false
 FORCE=false
 CHECK_MODE=false
 DRY_RUN=false
+INTERACTIVE_PICK=false   # set true when the interactive numbered picker runs
 
 for arg in "$@"; do
     case "$arg" in
@@ -437,19 +440,17 @@ detect_gpu() {
 # --list
 # ─────────────────────────────────────────────────────────────────────────
 # The catalog body: open drivers (all open-module) + legacy branches with a
-# MODULES column. Shared by --list and the interactive picker so both show the
-# full matrix and the open/proprietary flavor. Optional $1 = branch to mark as
-# "recommended" (the card-detected default).
+# MODULES column. Used by --list (print_catalog) to show the full matrix and
+# the open/proprietary flavor. The interactive picker renders its own numbered
+# menu (run_interactive_picker), so no "recommended" marking is needed here.
 print_catalog_body() {
-    local rec="${1:-}"
     echo "Open drivers (Turing and newer — open kernel modules):"
     printf "  %-12s %-11s %s\n" "VERSION" "MODULES" "SELECT"
-    local v first=true mark
+    local v first=true
     while IFS= read -r v; do
         [ -z "$v" ] && continue
         if $first; then
-            mark=""; [ "$rec" = "latest" ] && mark="  <- recommended"
-            printf "  %-12s %-11s %s%s\n" "$v" "open" "--branch=latest" "$mark"
+            printf "  %-12s %-11s %s\n" "$v" "open" "--branch=latest"
             first=false
         else
             printf "  %-12s %-11s %s\n" "$v" "open" "--driver=$v"
@@ -464,9 +465,107 @@ print_catalog_body() {
         ver=$(catalog_branch_version "$b")
         kmod=$(catalog_branch_field "$b" kmod)
         sup=$(catalog_branch_field "$b" support)
-        mark=""; [ "$rec" = "$b" ] && mark="  <- recommended"
-        printf "  %-14s %-12s %-12s %s%s\n" "$b" "${ver:-?}" "$kmod" "$sup" "$mark"
+        printf "  %-14s %-12s %-12s %s\n" "$b" "${ver:-?}" "$kmod" "$sup"
     done < <(catalog_branch_names)
+}
+
+# Interactive numbered picker. Builds a menu from the catalog (open trains
+# newest-per-major, then legacy branches), preselects the card-detected
+# recommendation, and reads one choice. Sets SELECTED_BRANCH or TARGET_NV_VER
+# in caller scope. $1 = recommended branch (may be empty if no card detected).
+# A pure integer is a menu index; an X.Y[.Z] string is an exact version; any
+# other word is accepted as a branch name (back-compat with the old prompt).
+run_interactive_picker() {
+    local rec="${1:-}"
+    local -a m_label m_ver m_kmod m_branch m_note
+    local v first=true major def_idx="" i=0 n mark
+
+    # Open trains (open_latest is newest-per-major). First entry is branch "latest".
+    while IFS= read -r v; do
+        [ -z "$v" ] && continue
+        if $first; then
+            m_label+=("latest"); m_ver+=("$v"); m_kmod+=("open"); m_branch+=("latest"); m_note+=("")
+            first=false
+        else
+            major="${v%%.*}"
+            m_label+=("train ${major}"); m_ver+=("$v"); m_kmod+=("open"); m_branch+=(""); m_note+=("")
+        fi
+    done < <(catalog_open_latest)
+
+    # Legacy branches.
+    local b ver kmod sup
+    while IFS= read -r b; do
+        [ "$b" = "latest" ] && continue
+        ver=$(catalog_branch_version "$b")
+        kmod=$(catalog_branch_field "$b" kmod)
+        sup=$(catalog_branch_field "$b" support)
+        m_label+=("$b"); m_ver+=("$ver"); m_kmod+=("$kmod"); m_branch+=("$b")
+        if [ "$sup" = "best-effort" ]; then m_note+=("best-effort, needs patched .run"); else m_note+=(""); fi
+    done < <(catalog_branch_names)
+
+    n="${#m_label[@]}"
+    echo ""
+    echo "Choose a driver:"
+    for ((i=0; i<n; i++)); do
+        mark="${m_note[$i]}"
+        if [ -n "$rec" ] && [ "${m_branch[$i]}" = "$rec" ]; then
+            def_idx="$((i+1))"
+            mark="recommended${mark:+ · $mark}"
+        fi
+        printf "  %2d) %-12s %-11s %-12s %s\n" \
+            "$((i+1))" "${m_label[$i]}" "${m_ver[$i]}" "${m_kmod[$i]}" "$mark"
+    done
+    echo "  (or type an exact X.Y.Z version)"
+
+    local prompt reply
+    if [ -n "$def_idx" ]; then prompt="Selection [${def_idx}]: "
+    else prompt="Selection (number or X.Y.Z): "; fi
+    printf "%s" "$prompt"
+    read -r reply </dev/tty || true
+    [ -z "$reply" ] && reply="$def_idx"
+    [ -n "$reply" ] || { echo "ERROR: no selection and no recommendation to default to." >&2; exit 1; }
+
+    if printf '%s' "$reply" | grep -qE '^[0-9]+$'; then
+        if [ "$reply" -lt 1 ] || [ "$reply" -gt "$n" ]; then
+            echo "ERROR: selection out of range: $reply (1-$n)" >&2; exit 1
+        fi
+        i="$((reply-1))"
+        if [ -n "${m_branch[$i]}" ]; then SELECTED_BRANCH="${m_branch[$i]}"
+        else TARGET_NV_VER="${m_ver[$i]}"; SELECTED_BRANCH=""; fi
+    elif printf '%s' "$reply" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$'; then
+        TARGET_NV_VER="$reply"; SELECTED_BRANCH=""
+    else
+        SELECTED_BRANCH="$reply"
+    fi
+}
+
+# Prompt for the kernel-module flavor when the .run ships both (515+). $1 =
+# driver version, $2 = recommended default (open|proprietary). Echoes the
+# chosen flavor on stdout; all UI goes to stderr so $(prompt_kmod ...) captures
+# only the answer. An unrecognized reply keeps the recommended default.
+prompt_kmod() {
+    local ver="$1" def="$2" reply def_num reason
+    if [ "$def" = "open" ]; then def_num=1; reason="recommended for Turing and newer"
+    else def_num=2; reason="recommended for this card"; fi
+    {
+        echo ""
+        echo "Driver ${ver} ships both module flavors:"
+        if [ "$def" = "open" ]; then
+            echo "  1) open         <- ${reason}"
+            echo "  2) proprietary"
+        else
+            echo "  1) open"
+            echo "  2) proprietary  <- ${reason}"
+        fi
+        printf "Modules [%d]: " "$def_num"
+    } >&2
+    read -r reply </dev/tty || true
+    [ -z "$reply" ] && reply="$def_num"
+    case "$reply" in
+        1|open)        echo "open" ;;
+        2|proprietary) echo "proprietary" ;;
+        *)             echo "$def" ;;
+    esac
 }
 
 print_catalog() {
@@ -789,29 +888,15 @@ if [ -z "$DRIVER_SRC" ]; then
         else
             echo "  No NVIDIA GPU detected (no 0x10de display device under /sys)."
         fi
-        if ! { : </dev/tty; } 2>/dev/null && [ -z "$SELECTED_BRANCH" ]; then
+        if { : </dev/tty; } 2>/dev/null; then
+            INTERACTIVE_PICK=true
+            run_interactive_picker "$SELECTED_BRANCH"
+        elif [ -z "$SELECTED_BRANCH" ]; then
             echo "ERROR: no card detected and no controlling terminal to prompt." >&2
             echo "       Pass --branch=NAME or --driver=X.Y.Z (see --list)." >&2
             exit 1
         fi
-        if { : </dev/tty; } 2>/dev/null; then
-            echo ""
-            print_catalog_body "$SELECTED_BRANCH"
-            echo ""
-            if [ -n "$SELECTED_BRANCH" ]; then
-                printf "Branch [%s], or type another / a X.Y.Z version: " "$SELECTED_BRANCH"
-            else
-                printf "Branch name, or a X.Y.Z version: "
-            fi
-            read -r reply </dev/tty || true
-            if [ -n "$reply" ]; then
-                if echo "$reply" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$'; then
-                    TARGET_NV_VER="$reply"; SELECTED_BRANCH=""
-                else
-                    SELECTED_BRANCH="$reply"
-                fi
-            fi
-        fi
+        # No tty but a card was detected: proceed with the recommended branch.
     fi
 
     # If a branch was selected (flag or interactive), resolve it now.
@@ -846,11 +931,24 @@ if [ -z "$DRIVER_SRC" ]; then
     fi
 
     # ── Derive kernel-module flavor ──
+    # --kmod wins. Otherwise compute the recommended default (branch kmod, else
+    # version-based). In the interactive picker, when the .run ships both
+    # flavors (515+), offer the choice with that default preselected; legacy
+    # branches are proprietary-only so there's nothing to ask.
     if [ -z "$KMOD_TYPE" ]; then
+        _default_kmod=""
         if [ -n "$SELECTED_BRANCH" ]; then
-            KMOD_TYPE=$(catalog_branch_field "$SELECTED_BRANCH" kmod)
+            _default_kmod=$(catalog_branch_field "$SELECTED_BRANCH" kmod)
         fi
-        [ -n "$KMOD_TYPE" ] || KMOD_TYPE=$(auto_kmod_for_version "$TARGET_NV_VER")
+        [ -n "$_default_kmod" ] || _default_kmod=$(auto_kmod_for_version "$TARGET_NV_VER")
+
+        _kmajor="${TARGET_NV_VER%%.*}"
+        if $INTERACTIVE_PICK && [ "$_kmajor" -ge 515 ] 2>/dev/null \
+               && { : </dev/tty; } 2>/dev/null; then
+            KMOD_TYPE=$(prompt_kmod "$TARGET_NV_VER" "$_default_kmod")
+        else
+            KMOD_TYPE="$_default_kmod"
+        fi
     fi
     echo "Kernel modules: $KMOD_TYPE"
 

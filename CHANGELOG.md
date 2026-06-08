@@ -15,6 +15,10 @@ All notable changes to `nvidia-driver-support` are documented here.
   (legacy-470/580/390/340 / latest), `--driver=X.Y.Z`, `--custom-run=PATH`, `--run-url=URL`,
   `--release=v<N>`; plus `--list`, `--check`, `--dry-run`, `--kmod`. `--list` and the
   interactive picker show the full open-train matrix and each branch's module flavor.
+  Run with no selector, the picker is a **numbered menu** (card-detected row
+  preselected — usually just press Enter), and for drivers that ship both kernel-module
+  flavors (515+) it follows up with an open-vs-proprietary prompt defaulted to the
+  card's recommendation. `--kmod` still overrides non-interactively.
 - **Legacy-branch support**: 470.x (Kepler) builds against modern (6.x) kernels via the
   vendored [`nvidia-470xx-linux-mainline`](https://github.com/joanbm/nvidia-470xx-linux-mainline)
   patch set (git submodule under `third_party/`); 580.x (Maxwell/Pascal/Volta) supported;
