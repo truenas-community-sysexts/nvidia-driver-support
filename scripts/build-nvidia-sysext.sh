@@ -82,7 +82,17 @@ OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 # pre-created predictable paths can't collide; it's removed on exit by the
 # trap below.
 WORK_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/nvidia-build.XXXXXX")
-cleanup_work_root() { rm -rf "$WORK_ROOT"; }
+cleanup_work_root() {
+    # Preserve the NVIDIA installer log next to the output before we tear down.
+    # Inside the on-host build container this lands in the bind-mounted --out
+    # dir (build-on-host.sh then moves it into the persistent logs/), so it
+    # survives the container's --rm — the single most useful artifact when a
+    # cross-compile fails. In CI --out=dist, so it rides along as an artifact.
+    if [ -f /var/log/nvidia-installer.log ] && [ -d "${OUT_DIR:-}" ]; then
+        cp -f /var/log/nvidia-installer.log "${OUT_DIR}/nvidia-installer.log" 2>/dev/null || true
+    fi
+    rm -rf "$WORK_ROOT"
+}
 trap cleanup_work_root EXIT
 
 STAGE1_DIR="${WORK_ROOT}/stage1"

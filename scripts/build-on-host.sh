@@ -41,6 +41,7 @@ RUN_FILE_OVERRIDE=""
 CACHE_DIR="/var/cache/nvidia-build"
 SCRIPTS_DIR=""
 OUT_FILE=""
+LOG_DIR=""
 DOCKER_IMAGE="ubuntu:24.04"
 
 for arg in "$@"; do
@@ -53,6 +54,7 @@ for arg in "$@"; do
         --cache-dir=*)          CACHE_DIR="${arg#*=}" ;;
         --scripts-dir=*)        SCRIPTS_DIR="${arg#*=}" ;;
         --out=*)                OUT_FILE="${arg#*=}" ;;
+        --log-dir=*)            LOG_DIR="${arg#*=}" ;;
         --docker-image=*)       DOCKER_IMAGE="${arg#*=}" ;;
         -h|--help)
             sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'
@@ -83,10 +85,29 @@ OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 OUT_NAME="$(basename "$OUT_FILE")"
 OUT_FILE="${OUT_DIR}/${OUT_NAME}"
 
+# Persistent build logs. Default next to the persist root (the parent of the
+# build output dir, e.g. /mnt/<pool>/.config/nvidia-gpu/logs); the installer
+# passes --log-dir explicitly. Each run writes build-<ts>.log (full console)
+# and, on completion, nvidia-installer-<ts>.log (lifted out of the container).
+LOG_DIR="${LOG_DIR:-$(dirname "$OUT_DIR")/logs}"
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+LOG_TS="$(date +%Y%m%d-%H%M%S)"
+BUILD_LOG="${LOG_DIR}/build-${LOG_TS}.log"
+
 info()   { echo "[build-on-host] $*"; }
 warn()   { echo "[build-on-host] WARN: $*" >&2; }
 die()    { echo "[build-on-host] FATAL: $*" >&2; exit 1; }
 banner() { printf "\n==========================================================\n  %s\n==========================================================\n\n" "$*"; }
+
+# Keep only the newest 3 of each log family so the dir can't grow unbounded.
+prune_logs() {
+    local prefix
+    for prefix in build nvidia-installer; do
+        find "$LOG_DIR" -maxdepth 1 -type f -name "${prefix}-*.log" -printf '%T@ %p\n' 2>/dev/null \
+            | sort -rn | tail -n +4 | cut -d' ' -f2- \
+            | while IFS= read -r f; do [ -n "$f" ] && rm -f "$f"; done
+    done
+}
 
 command -v docker >/dev/null 2>&1 \
     || die "docker not found in PATH — TrueNAS Apps requires it; if you've never enabled Apps, install it or run the build elsewhere"
@@ -220,14 +241,34 @@ info "  TrueNAS version: $TRUENAS_VERSION${TRUENAS_CODENAME:+ ($TRUENAS_CODENAME
 info "  Cache dir      : $CACHE_DIR"
 info "  Output         : $OUT_FILE"
 
+info "  Build log      : $BUILD_LOG"
+
+# Tee the whole container console to the persistent build log. PIPESTATUS[0]
+# (not $?) is docker's exit — $? would be tee's. Captured with set +e so the
+# log relocation + prune below run on failure too, before we die.
+set +e
 docker run --rm \
     -v "${SCRIPTS_DIR}:/work/scripts:ro" \
     -v "${CACHE_DIR}:/work/cache" \
     -v "${OUT_DIR}:/work/out" \
     -e DEBIAN_FRONTEND=noninteractive \
     "$DOCKER_IMAGE" \
-    bash -c "$INNER_SCRIPT" \
-    || die "container build failed — see output above"
+    bash -c "$INNER_SCRIPT" 2>&1 | tee "$BUILD_LOG"
+BUILD_RC=${PIPESTATUS[0]}
+set -e
+
+# build-nvidia-sysext.sh dropped the installer log into the bind-mounted out
+# dir (survives --rm). Move it into logs/ with a matching timestamp, whether
+# the build passed or failed.
+if [ -f "${OUT_DIR}/nvidia-installer.log" ]; then
+    mv -f "${OUT_DIR}/nvidia-installer.log" "${LOG_DIR}/nvidia-installer-${LOG_TS}.log" 2>/dev/null \
+        && info "  Installer log  : ${LOG_DIR}/nvidia-installer-${LOG_TS}.log" || true
+fi
+prune_logs
+
+if [ "$BUILD_RC" -ne 0 ]; then
+    die "container build failed — see output above, or the saved logs in ${LOG_DIR} (build-${LOG_TS}.log)"
+fi
 
 [ -f "${OUT_DIR}/nvidia.raw" ] \
     || die "build claimed success but ${OUT_DIR}/nvidia.raw is missing"
