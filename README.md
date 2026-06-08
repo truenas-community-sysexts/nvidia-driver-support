@@ -9,7 +9,7 @@ curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-dr
 sudo reboot
 ```
 
-> **Driver-only.** This repo owns the **driver swap**. If you want **MIG** on a Blackwell card, install [`nvidia-mig-support`](https://github.com/truenas-community-sysexts/nvidia-mig-support) in its **default mode** afterwards — it layers on top of whatever driver is present. (Don't use that repo's `--with-driver` path alongside this one; see [MIG coexistence](#coexistence-with-nvidia-mig-support).)
+> **Driver-only.** This repo owns the **driver swap**. If you want **MIG** on a Blackwell card, install [`nvidia-mig-support`](https://github.com/truenas-community-sysexts/nvidia-mig-support) after the reboot. The MIG sysext layers on top of whatever driver is present.  see [MIG coexistence](#coexistence-with-nvidia-mig-support).)
 
 ## Why this exists
 
@@ -122,13 +122,6 @@ The PREINIT restores your custom driver automatically when an update wipes `/usr
 ```bash
 curl -fsSL .../scripts/install-nvidia-driver.sh | sudo bash -s -- --rebuild
 ```
-
-## Coexistence with `nvidia-mig-support`
-
-This sysext is the base package for nvidia drivers.  If you need Multi-Instance Graphics (MIG) with a supported workstation or server card please install the MIG sysext.
-
-- **Driver only** → this repo - it should be installed first.
-- **Driver + MIG** → afer installing this sysext first and rebooting you then install  `nvidia-mig-support`
 
 ## Scripts reference
 
