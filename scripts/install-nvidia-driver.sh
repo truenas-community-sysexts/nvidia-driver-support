@@ -440,19 +440,17 @@ detect_gpu() {
 # --list
 # ─────────────────────────────────────────────────────────────────────────
 # The catalog body: open drivers (all open-module) + legacy branches with a
-# MODULES column. Shared by --list and the interactive picker so both show the
-# full matrix and the open/proprietary flavor. Optional $1 = branch to mark as
-# "recommended" (the card-detected default).
+# MODULES column. Used by --list (print_catalog) to show the full matrix and
+# the open/proprietary flavor. The interactive picker renders its own numbered
+# menu (run_interactive_picker), so no "recommended" marking is needed here.
 print_catalog_body() {
-    local rec="${1:-}"
     echo "Open drivers (Turing and newer — open kernel modules):"
     printf "  %-12s %-11s %s\n" "VERSION" "MODULES" "SELECT"
-    local v first=true mark
+    local v first=true
     while IFS= read -r v; do
         [ -z "$v" ] && continue
         if $first; then
-            mark=""; [ "$rec" = "latest" ] && mark="  <- recommended"
-            printf "  %-12s %-11s %s%s\n" "$v" "open" "--branch=latest" "$mark"
+            printf "  %-12s %-11s %s\n" "$v" "open" "--branch=latest"
             first=false
         else
             printf "  %-12s %-11s %s\n" "$v" "open" "--driver=$v"
@@ -467,8 +465,7 @@ print_catalog_body() {
         ver=$(catalog_branch_version "$b")
         kmod=$(catalog_branch_field "$b" kmod)
         sup=$(catalog_branch_field "$b" support)
-        mark=""; [ "$rec" = "$b" ] && mark="  <- recommended"
-        printf "  %-14s %-12s %-12s %s%s\n" "$b" "${ver:-?}" "$kmod" "$sup" "$mark"
+        printf "  %-14s %-12s %-12s %s\n" "$b" "${ver:-?}" "$kmod" "$sup"
     done < <(catalog_branch_names)
 }
 
