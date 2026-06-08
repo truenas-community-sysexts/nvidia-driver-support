@@ -99,7 +99,8 @@ jobs:
           PY
           echo "=== release-notes.md ==="; cat release-notes.md
 
-      - name: Publish release
+      - name: Create draft release with assets
+        id: release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ github.run_number }}
@@ -114,14 +115,26 @@ jobs:
             scripts/build-on-host.sh
             scripts/build-nvidia-sysext.sh
             catalog/driver-catalog.json
-          draft: false
-          # Default: prerelease gated behind a hardware-test issue (promoted by
-          # promote.yml on issue close). Override mark_latest=true to publish
-          # straight to Latest.
-          prerelease: ${{ inputs.mark_latest != 'true' }}
-          make_latest: ${{ inputs.mark_latest == 'true' }}
+          # Draft first so assets attach even on immutable-release repos.
+          draft: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Publish the draft: as a prerelease gated behind a hardware-test issue
+      # (default; promote.yml flips it to Latest on issue close), or straight to
+      # Latest on the mark_latest=true override.
+      - name: Publish the draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          REL_ID: ${{ steps.release.outputs.id }}
+          MARK_LATEST: ${{ inputs.mark_latest }}
+        run: |
+          if [ "$MARK_LATEST" = "true" ]; then
+            gh api --method PATCH "repos/${REPO}/releases/${REL_ID}" -F draft=false -f make_latest=true
+          else
+            gh api --method PATCH "repos/${REPO}/releases/${REL_ID}" -F draft=false -F prerelease=true
+          fi
 
       - name: Open hardware-test issue (prerelease gate)
         if: inputs.mark_latest != 'true'
