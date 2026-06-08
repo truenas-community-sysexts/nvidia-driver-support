@@ -11,7 +11,8 @@
 #
 # Installer flags are selected per driver branch: pre-515 legacy installers
 # predate the open/proprietary split (--kernel-module-type) and some newer
-# flags, so the set passed to the .run is filtered against its own --help.
+# flags, so the set passed to the .run is filtered against its own
+# --advanced-options listing.
 # See select_installer_flags() below.
 #
 # Usage:
@@ -153,7 +154,8 @@ write_extension_release() {
 
 # Build the NVIDIA .run installer flag list for this driver version. The
 # installer's flag surface changed across branches, so we filter against
-# the installer's own --help rather than hard-coding one set:
+# the installer's own --advanced-options listing rather than hard-coding one
+# set (all the gated flags below are advanced options, absent from --help):
 #
 #   --kernel-module-type   only exists on 515+ (the open/proprietary split).
 #                          Pre-515 branches (470/390/340) are proprietary-only;
@@ -174,7 +176,7 @@ write_extension_release() {
 #                          470) may lack one or more. Passing an unknown flag
 #                          makes the .run abort with "unrecognized option", so
 #                          every flag beyond the essential set below is gated on
-#                          the installer advertising it in --help.
+#                          the installer advertising it in --advanced-options.
 #
 # Only --silent, --kernel-source-path and --kernel-name are passed
 # unconditionally: they exist on every supported .run and the cross-compile
@@ -188,7 +190,15 @@ write_extension_release() {
 # (Phase 4) before this is invoked.
 select_installer_flags() {
     local help major
-    help="$("./${RUN_FILE}" --help 2>&1 || true)"
+    # Probe --advanced-options, NOT --help: an NVIDIA .run is a makeself
+    # archive whose --help lists only the *common* options. Every flag gated
+    # below (--no-x-check, --skip-module-load, --allow-installation-with-
+    # running-driver, --kernel-module-type, ...) is an *advanced* option and
+    # appears solely under --advanced-options. Probing --help matched none of
+    # them and silently dropped all of them — which made the installer abort
+    # on a host with the stock driver loaded (no --allow-installation-with-
+    # running-driver). --advanced-options prints common + advanced options.
+    help="$("./${RUN_FILE}" --advanced-options 2>&1 || true)"
     major="${NVIDIA_VERSION%%.*}"
 
     # Essential flags every supported .run understands.

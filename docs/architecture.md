@@ -42,7 +42,7 @@ install, via [`build-on-host.sh`](../scripts/build-on-host.sh)):
    `usr/src` + `usr/lib/modules` to get the **kernel headers** for the running kernel.
 2. Download the NVIDIA `.run` for the chosen version.
 3. **Select installer flags per branch** — `select_installer_flags()` filters the flag set
-   against the installer's own `--help`. Pre-515 legacy installers don't have
+   against the installer's own `--advanced-options` listing. Pre-515 legacy installers don't have
    `--kernel-module-type` (proprietary-only) and may lack `--no-drm`/`--install-libglvnd`;
    those are dropped so the old `.run` doesn't abort.
 4. Snapshot `/usr`+`/etc` before/after the silent install to capture every new file.
