@@ -5,9 +5,12 @@ Scrapes the autoindex at https://us.download.nvidia.com/XFree86/Linux-x86_64/
 for version directories (X.Y.Z), then:
 
   * open_latest  = the newest open-capable (>= 515) driver per distinct major
-                   ("train"), newest first, capped at `open_latest_count`.
-                   Deduping by major keeps whole trains from being evicted when
-                   one branch ships several point releases.
+                   ("train"), newest first, capped at `open_latest_count`, and
+                   never above NVIDIA's blessed production latest (latest.txt).
+                   latest.txt is the authority for "latest", so versions NVIDIA
+                   published but hasn't promoted (new-feature-branch / beta) are
+                   excluded; each kept version must also ship a -no-compat32.run.
+                   (Users can still install anything via --driver=X.Y.Z.)
   * branches[legacy-*].version = the highest X.Y.Z found whose major matches
                    that branch's series (470/580/390/340). NVIDIA still ships
                    occasional security updates to legacy branches, so we track
@@ -54,6 +57,42 @@ def vkey(v):
     return tuple(int(x) for x in v.split("."))
 
 
+# latest.txt is NVIDIA's blessed production-latest pointer; the bare directory
+# index also lists versions NVIDIA hasn't promoted (new-feature-branch / beta).
+LATEST_TXT_URL = "https://download.nvidia.com/XFree86/Linux-x86_64/latest.txt"
+RUN_URL_TMPL = (
+    "https://us.download.nvidia.com/XFree86/Linux-x86_64/"
+    "{v}/NVIDIA-Linux-x86_64-{v}-no-compat32.run"
+)
+
+
+def fetch_latest_txt():
+    """The blessed production-latest version from latest.txt, or None."""
+    req = urllib.request.Request(LATEST_TXT_URL, headers={"User-Agent": "catalog-refresh"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        txt = resp.read().decode("utf-8", "replace")
+    m = re.match(r"\s*(\d+\.\d+(?:\.\d+)?)", txt)
+    return m.group(1) if m else None
+
+
+def run_ships(v):
+    """True if this version publishes a buildable -no-compat32.run — i.e. a real
+    shipping Linux driver, not a placeholder / pulled directory."""
+    url = RUN_URL_TMPL.format(v=v)
+    # HEAD first; some CDNs reject it, so fall back to a 1-byte ranged GET.
+    for headers, method in (
+        ({"User-Agent": "catalog-refresh"}, "HEAD"),
+        ({"User-Agent": "catalog-refresh", "Range": "bytes=0-0"}, "GET"),
+    ):
+        try:
+            req = urllib.request.Request(url, headers=headers, method=method)
+            with urllib.request.urlopen(req, timeout=20) as r:
+                return 200 <= r.status < 400
+        except Exception:  # noqa: BLE001
+            continue
+    return False
+
+
 def main():
     check_only = "--check" in sys.argv
     with open(CATALOG) as f:
@@ -70,17 +109,38 @@ def main():
 
     versions.sort(key=vkey, reverse=True)
 
-    # open_latest: newest open-capable (>= 515) driver per distinct major
-    # ("train"), newest-first, capped at N. Deduping by major stops one branch's
-    # point releases (e.g. four 595.x) from crowding whole trains (590, 580, ...)
-    # off the list — `versions` is already sorted newest-first, so the first
-    # version seen for a major is that train's newest.
+    # open_latest: the newest open-capable (>= 515) driver per distinct major
+    # ("train"), newest-first, capped at N — but NEVER above NVIDIA's blessed
+    # production latest (latest.txt). The bare index also contains versions
+    # NVIDIA published but hasn't promoted (new-feature-branch / beta); latest.txt
+    # is the authority for "latest", so we use it as a ceiling and exclude
+    # anything higher. Deduping by major keeps whole trains from being evicted by
+    # one branch's point releases. Each kept version must also ship a real
+    # -no-compat32.run (no placeholder / pulled dirs). Users can still install
+    # anything above the ceiling explicitly via --driver=X.Y.Z (betas included).
     n = cat.get("open_latest_count", 5)
-    open_trains = {}
-    for v in versions:
-        if vkey(v)[0] >= 515:
-            open_trains.setdefault(vkey(v)[0], v)
-    new_open_latest = list(open_trains.values())[:n]
+    try:
+        latest_txt = fetch_latest_txt()
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN: could not fetch latest.txt: {e}", file=sys.stderr)
+        latest_txt = None
+
+    if not latest_txt:
+        print("WARN: latest.txt unavailable — leaving open_latest unchanged", file=sys.stderr)
+        new_open_latest = cat.get("open_latest", [])
+    else:
+        ceiling = vkey(latest_txt)
+        # Trust latest.txt for its own train even if a HEAD check flakes.
+        open_trains = {ceiling[0]: latest_txt}
+        for v in versions:                       # newest-first
+            k = vkey(v)
+            if k[0] < 515 or k > ceiling:
+                continue                          # pre-515, or above the blessed latest
+            if k[0] in open_trains:
+                continue
+            if run_ships(v):
+                open_trains[k[0]] = v
+        new_open_latest = sorted(open_trains.values(), key=vkey, reverse=True)[:n]
 
     # legacy branch pins: newest version matching the branch major.
     new_branches = json.loads(json.dumps(cat.get("branches", {})))
