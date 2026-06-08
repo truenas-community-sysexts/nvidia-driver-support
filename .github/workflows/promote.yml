@@ -1,0 +1,98 @@
+name: Promote release on hardware-test sign-off
+
+# When a `hardware-test` issue is closed as completed, promote the prerelease
+# it gates: flip it from prerelease to a full release marked "Latest", and
+# append a changelog (GitHub's PR-based auto-notes + a commit list, since most
+# changes here land as direct pushes that PR-notes miss). The release tag is
+# read from a `<!-- release-tag: vX -->` marker the build writes into the issue
+# body, so this is independent of issue-title formatting.
+#
+# Editing a release does not touch the protected branch, so the default
+# GITHUB_TOKEN (contents: write) is sufficient — no app token needed.
+
+on:
+  issues:
+    types: [closed]
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  promote:
+    # Only hardware-test issues closed as "completed" (not "not planned").
+    if: >-
+      contains(github.event.issue.labels.*.name, 'hardware-test') &&
+      github.event.issue.state_reason == 'completed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Promote the prerelease this issue gates
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const { owner, repo } = context.repo;
+
+            const m = (issue.body || '').match(/<!--\s*release-tag:\s*(\S+?)\s*-->/);
+            if (!m) {
+              core.info('No <!-- release-tag --> marker in issue body; nothing to promote.');
+              return;
+            }
+            const tag = m[1];
+
+            let release;
+            try {
+              release = (await github.rest.repos.getReleaseByTag({ owner, repo, tag })).data;
+            } catch (e) {
+              if (e.status === 404) {
+                await github.rest.issues.createComment({ owner, repo, issue_number: issue.number,
+                  body: `⚠️ No release found for tag \`${tag}\` — nothing to promote.` });
+                return;
+              }
+              throw e;
+            }
+
+            if (!release.prerelease) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: issue.number,
+                body: `ℹ️ Release [\`${tag}\`](${release.html_url}) is already promoted (not a prerelease). No change.` });
+              return;
+            }
+
+            // Previous release (by created_at) bounds the changelog range.
+            const rels = (await github.rest.repos.listReleases({ owner, repo, per_page: 100 })).data
+              .filter(r => r.id !== release.id && !r.draft)
+              .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            const prev = rels.find(r => new Date(r.created_at) <= new Date(release.created_at));
+
+            // GitHub's PR-based auto-notes.
+            let prNotes = '';
+            try {
+              const gen = await github.rest.repos.generateReleaseNotes({ owner, repo, tag_name: tag,
+                ...(prev ? { previous_tag_name: prev.tag_name } : {}) });
+              prNotes = (gen.data.body || '').trim();
+            } catch (e) { core.warning(`generate-notes failed: ${e.message}`); }
+
+            // Commit list — captures the direct/app pushes PR-notes don't.
+            let commits = '';
+            if (prev) {
+              try {
+                const cmp = await github.rest.repos.compareCommitsWithBasehead({ owner, repo,
+                  basehead: `${prev.tag_name}...${tag}` });
+                commits = (cmp.data.commits || [])
+                  .map(c => `- ${c.commit.message.split('\n')[0]} (\`${c.sha.slice(0, 7)}\`)`)
+                  .join('\n');
+              } catch (e) { core.warning(`compare failed: ${e.message}`); }
+            }
+
+            let changelog = '\n\n## Changelog\n';
+            if (prNotes) changelog += `\n${prNotes}\n`;
+            if (commits) changelog += `\n### Commits\n${commits}\n`;
+            if (!prNotes && !commits) changelog += '\n_Initial release._\n';
+
+            await github.rest.repos.updateRelease({ owner, repo, release_id: release.id,
+              prerelease: false, make_latest: 'true',
+              body: (release.body || '') + changelog });
+
+            await github.rest.issues.createComment({ owner, repo, issue_number: issue.number,
+              body: `✅ Verified — promoted [\`${tag}\`](${release.html_url}) to the latest release and appended the changelog.` });
+            core.info(`Promoted ${tag} to latest.`);

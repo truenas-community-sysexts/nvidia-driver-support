@@ -3,39 +3,39 @@ name: Release
 # Cuts a versioned "NVIDIA driver installer" release.
 #
 # A release is a snapshot of the MIT install tooling + the driver catalog (the
-# whole supported matrix) — it is NOT tied to a specific driver, kmod, or
-# TrueNAS version, and never carries nvidia.raw (NVIDIA's EULA bars
-# redistributing the proprietary userspace). The install script detects the
-# card and builds the right driver ON THE USER'S HOST, against that host's
-# kernel + TrueNAS version, for whatever the catalog offers — so one release
-# covers the entire driver x kmod x card matrix.
+# whole supported matrix) — NOT tied to a specific driver, kmod, or TrueNAS
+# version, and never carries nvidia.raw (NVIDIA's EULA bars redistributing the
+# proprietary userspace). The install script detects the card and builds the
+# right driver ON THE USER'S HOST, so one release covers the whole matrix.
 #
-# Tag: `v<run_number>` — an auto-incrementing release counter
-# (github.run_number). Manual dispatch only; always promoted to GitHub
-# "Latest" (every release is a deliberate, gated cut).
+# Tag: `v<run_number>`. Manual dispatch.
 #
-# GATING: a release cannot be cut unless
-#   1. the FULL build-sysext smoke matrix compiles green on this commit
-#      (CI passed — proves the tooling + catalog actually build every variant), and
-#   2. the operator attests, via required inputs, that they verified at least
-#      one driver variant ON REAL HARDWARE (CI can't drive a GPU).
-# Both are recorded in the release notes.
+# GATE (unified across the org):
+#   1. CI passed — the FULL build-sysext smoke matrix (every driver variant)
+#      must compile green on this commit (release.yml calls build-sysext.yml as
+#      a required `smoke` job; publish needs it).
+#   2. Human-tested — the build publishes a PRERELEASE and opens a
+#      `hardware-test` issue. After verifying >=1 driver variant on real
+#      hardware, the operator closes that issue, which (via promote.yml) flips
+#      the prerelease to Latest and appends the changelog.
+# Override: dispatch with mark_latest=true to publish straight to Latest
+# (skips the issue gate) — for a first release or trivial tooling fix.
 
 on:
   workflow_dispatch:
     inputs:
-      tested_driver:
-        description: 'Driver build you verified ON HARDWARE (e.g. "580.82.07 open" or "legacy-470")'
-        required: true
-      tested_truenas:
-        description: 'TrueNAS version you tested on (e.g. 25.10.4)'
-        required: true
-      tested_card:
-        description: 'GPU you tested with (e.g. "RTX 4070")'
-        required: true
+      mark_latest:
+        description: 'true = publish straight to Latest; false (default) = prerelease + hardware-test gate'
+        required: false
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+        default: 'false'
 
 permissions:
   contents: write
+  issues: write
 
 jobs:
   # Gate 1 (CI passed): run the entire driver build matrix on this commit.
@@ -50,34 +50,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # Gate 2 (human-tested): the dispatch inputs are required, but reject
-      # blank/whitespace so the attestation can't be a no-op.
-      - name: Validate hardware-test attestation
-        env:
-          TESTED_DRIVER: ${{ inputs.tested_driver }}
-          TESTED_TRUENAS: ${{ inputs.tested_truenas }}
-          TESTED_CARD: ${{ inputs.tested_card }}
-        run: |
-          set -euo pipefail
-          miss=0
-          for v in TESTED_DRIVER TESTED_TRUENAS TESTED_CARD; do
-            val="${!v}"
-            if [ -z "${val// /}" ]; then
-              echo "::error::${v} must not be blank — a release requires an on-hardware attestation"
-              miss=1
-            fi
-          done
-          [ "$miss" -eq 0 ] || exit 1
-          echo "Attestation: driver='${TESTED_DRIVER}' truenas='${TESTED_TRUENAS}' card='${TESTED_CARD}'"
-
       - name: Write release notes
         env:
           RUN_NUMBER: ${{ github.run_number }}
           COMMIT_SHA: ${{ github.sha }}
           REPO: ${{ github.repository }}
-          TESTED_DRIVER: ${{ inputs.tested_driver }}
-          TESTED_TRUENAS: ${{ inputs.tested_truenas }}
-          TESTED_CARD: ${{ inputs.tested_card }}
         run: |
           set -euo pipefail
           # Build the notes from the catalog + CI smoke target so the "supported"
@@ -101,9 +78,6 @@ jobs:
               f"- **Open drivers** (Turing+): {open_latest}",
               f"- **Legacy branches**: `{bv('legacy-580')}` (Maxwell/Pascal/Volta), `{bv('legacy-470')}` (Kepler) — proprietary; `{bv('legacy-390')}` (Fermi), `{bv('legacy-340')}` (Tesla) — best-effort/patched",
               f"- **Validated in CI against**: TrueNAS `{tn}` (full build matrix compiled green for this release)",
-              "",
-              "**Hardware-verified for this cut:** driver `%s` on TrueNAS `%s`, card `%s`." % (
-                  os.environ["TESTED_DRIVER"], os.environ["TESTED_TRUENAS"], os.environ["TESTED_CARD"]),
               "",
               "Open vs proprietary modules are auto-derived per card. The TrueNAS version is **not** pinned — the build adapts to the host's running kernel (25.x / 26.x aware), so this release works across TrueNAS versions; a kernel bump just triggers an on-host rebuild.",
               "",
@@ -141,7 +115,48 @@ jobs:
             scripts/build-nvidia-sysext.sh
             catalog/driver-catalog.json
           draft: false
-          prerelease: false
-          make_latest: true
+          # Default: prerelease gated behind a hardware-test issue (promoted by
+          # promote.yml on issue close). Override mark_latest=true to publish
+          # straight to Latest.
+          prerelease: ${{ inputs.mark_latest != 'true' }}
+          make_latest: ${{ inputs.mark_latest == 'true' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Open hardware-test issue (prerelease gate)
+        if: inputs.mark_latest != 'true'
+        uses: actions/github-script@v9
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+        with:
+          script: |
+            const tag = `v${process.env.RUN_NUMBER}`;
+            const { owner, repo } = context.repo;
+            const releaseUrl = `https://github.com/${owner}/${repo}/releases/tag/${tag}`;
+            const title = `Hardware test: NVIDIA driver installer ${tag}`;
+            try {
+              await github.rest.issues.createLabel({ owner, repo, name: 'hardware-test',
+                color: 'FBCA04', description: 'Build awaiting verification on real hardware' });
+            } catch (e) { if (e.status !== 422) throw e; }
+            const existing = await github.rest.issues.listForRepo({ owner, repo,
+              state: 'open', labels: 'hardware-test', per_page: 100 });
+            if (existing.data.some(i => i.title.includes(tag))) {
+              console.log(`Open hardware-test issue already exists for ${tag}, skipping`); return;
+            }
+            await github.rest.issues.create({ owner, repo, title, labels: ['hardware-test'],
+              body: [
+                `The full driver build matrix compiled green in CI for this commit. Before promoting to **Latest**, verify at least one driver variant **on real hardware** (CI can't drive a GPU).`,
+                ``,
+                `**Release:** [${tag}](${releaseUrl})`,
+                `<!-- release-tag: ${tag} -->`,
+                ``,
+                `### Test checklist (at least one variant)`,
+                `- [ ] \`curl -fsSL ${`https://raw.githubusercontent.com/${owner}/${repo}/main/scripts/install-nvidia-driver.sh`} | sudo bash\` on a box with an NVIDIA GPU`,
+                `- [ ] The picker recommends a sensible driver for the detected card`,
+                `- [ ] The driver builds on-host and \`nvidia-smi\` works after reboot`,
+                `- [ ] Note which driver/branch + card you tested in a comment below`,
+                ``,
+                `### Promote`,
+                `This build is published as a **pre-release**, so it is not served by \`releases/latest\` (or the install script's \`--release=latest\`) yet. Once verified, **close this issue as completed** — that automatically promotes [\`${tag}\`](${releaseUrl}) to the latest release and appends the changelog.`,
+              ].join('\n') });
+            console.log(`Created hardware-test issue for ${tag}`);
