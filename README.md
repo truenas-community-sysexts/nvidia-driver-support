@@ -1,6 +1,6 @@
 # TrueNAS Community NVIDIA Driver Support
 
-Install **any** NVIDIA driver on TrueNAS SCALE by swapping the stock driver sysext for one built on your own host — a legacy branch for a card TrueNAS no longer supports, a specific recent open driver, or a patched/custom `.run` you supply.
+Install **any** NVIDIA driver on TrueNAS by swapping the stock driver sysext for one built on your own host — a legacy branch for a card TrueNAS no longer supports, a specific recent open driver, or a patched/custom `.run` you supply.
 
 ```bash
 # On TrueNAS, as root — detects your card and recommends a driver:
@@ -13,7 +13,7 @@ sudo reboot
 
 ## Why this exists
 
-TrueNAS SCALE ships exactly one NVIDIA driver, and recent releases moved to a 570.x+ branch that **only supports Turing and newer GPUs with open kernel modules**. That drops a lot of hardware people still run in NAS boxes for transcoding and light compute:
+TrueNAS ships exactly one NVIDIA driver, and recent releases moved to a 570.x+ branch that **only supports Turing and newer GPUs with open kernel modules**. That drops a lot of hardware people still run in NAS boxes for transcoding and light compute:
 
 - **Kepler** (GTX 600/700, Quadro K-series) — last driver is the **470** branch
 - **Maxwell / Pascal / Volta** (GTX 900/10-series, Quadro P400/P2000, Titan V) — last driver is the **580** branch
@@ -93,7 +93,7 @@ curl -fsSL .../scripts/install-nvidia-driver.sh | sudo bash -s -- --release=v5
 
 ## Prerequisites
 
-- TrueNAS SCALE 25.10 or later
+- TrueNAS 25.10 or later
 - A working Docker daemon (TrueNAS Apps users already have it; on a headless box with Apps disabled the build starts Docker and restores its prior state on exit)
 - A stock-driver backup before the first swap — the install refuses without one. Create it once:
   ```bash
