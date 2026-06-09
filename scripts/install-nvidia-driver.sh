@@ -1270,7 +1270,16 @@ except Exception:
         || echo "  WARN: docker.update returned an error — middleware may be flapping"
     printf "  Waiting for GPU compute clients to release... 0s/30s"
     for attempt in $(seq 1 10); do
-        N=$(/usr/bin/nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | wc -l || echo 0)
+        # nvidia-smi can exit non-zero for benign reasons (MIG enabled, or a
+        # transient driver/library version mismatch) while still printing the
+        # compute-app rows. Under `set -o pipefail` that non-zero exit must NOT
+        # turn into a second value: the old `... | wc -l || echo 0` appended "0"
+        # after wc had already printed the count, yielding N="<count>\n0" — which
+        # then aborted the install on `[ "$N" -eq 0 ]` (integer expression
+        # expected). Count the digit-bearing (PID) lines and tolerate a non-zero
+        # pipeline exit so N is always a single integer.
+        N=$(/usr/bin/nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | grep -c '[0-9]' || true)
+        N=${N:-0}
         if [ "${N:-0}" -eq 0 ]; then printf "\r  GPU compute clients released                              \n"; break; fi
         printf "\r  Waiting for %d GPU process(es)... %ds/30s" "$N" "$((attempt * 3))"; sleep 3
     done
