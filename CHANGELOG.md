@@ -31,7 +31,7 @@ All notable changes to `nvidia-driver-support` are documented here.
   (lifted out of the container on success *and* failure). Kept to the newest 3 of each; removed
   by uninstall; printed in the build output and on failure so issue reports can attach them. In
   CI the installer log also rides along in the build output dir.
-- Initial release. Driver-only NVIDIA sysext for TrueNAS SCALE, forked from the on-host
+- Initial release. Driver-only NVIDIA sysext for TrueNAS, forked from the on-host
   build pipeline in [`nvidia-mig-support`](https://github.com/truenas-community-sysexts/nvidia-mig-support).
 - **Driver catalog + card-aware picker** (`install-nvidia-driver.sh`): detects the GPU via
   `/sys` (vendor `0x10de` + display class), names the chip via `lspci` when the host's PCI
