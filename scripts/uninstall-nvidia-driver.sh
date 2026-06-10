@@ -103,7 +103,8 @@ if [ -x /usr/bin/nvidia-smi ]; then
     for attempt in $(seq 1 24); do
         N=$(/usr/bin/nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | wc -l || echo 0)
         if [ "${N:-0}" -eq 0 ]; then printf "\r  GPU released                                            \n"; break; fi
-        printf "\r  Waiting for %d GPU process(es)... %ds/120s" "$N" "$((attempt * 5))"; sleep 5
+        # Fixed-width field clears the placeholder line above (bare \r leaves its tail).
+        printf "\r  %-41s" "Waiting for $N GPU process(es)... $((attempt * 5))s/120s"; sleep 5
     done
     [ "${attempt:-0}" -eq 24 ] && echo ""
 fi
