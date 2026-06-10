@@ -6,8 +6,8 @@ Install **any** NVIDIA driver on TrueNAS by swapping the stock driver sysext for
 # On TrueNAS, as root — detects your card and recommends a driver:
 curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-driver-support/main/scripts/install-nvidia-driver.sh \
   | sudo bash
-sudo reboot
 ```
+Then reboot if install was ok.
 
 > **Driver-only.** This repo owns the **driver swap**. If you want **MIG** on a Blackwell card, install [`nvidia-mig-support`](https://github.com/truenas-community-sysexts/nvidia-mig-support) after the reboot. The MIG sysext layers on top of whatever driver is present.  see [MIG coexistence](#coexistence-with-nvidia-mig-support).)
 
