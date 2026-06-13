@@ -57,6 +57,34 @@ def vkey(v):
     return tuple(int(x) for x in v.split("."))
 
 
+def get_opt(flag, default=None):
+    """Value following `flag` in argv, or default. e.g. --summary-file PATH."""
+    if flag in sys.argv:
+        i = sys.argv.index(flag)
+        if i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+    return default
+
+
+def build_summary(old_open, new_open, old_branches, new_branches):
+    """Markdown bullet lines describing what this refresh changed, so the
+    release/issue can say what's new instead of a bare "drivers updated".
+    Returns a list of `- ...` lines (empty if nothing material changed)."""
+    lines = []
+    added = [v for v in new_open if v not in old_open]
+    removed = [v for v in old_open if v not in new_open]
+    if added:
+        lines.append("- New open driver(s): " + ", ".join(f"`{v}`" for v in added))
+    if removed:
+        lines.append("- Dropped open driver(s): " + ", ".join(f"`{v}`" for v in removed))
+    for name, b in new_branches.items():
+        old = old_branches.get(name, {}).get("version")
+        new = b.get("version")
+        if old and new and old != new:
+            lines.append(f"- `{name}`: `{old}` → `{new}`")
+    return lines
+
+
 # latest.txt is NVIDIA's blessed production-latest pointer; the bare directory
 # index also lists versions NVIDIA hasn't promoted (new-feature-branch / beta).
 LATEST_TXT_URL = "https://download.nvidia.com/XFree86/Linux-x86_64/latest.txt"
@@ -161,13 +189,20 @@ def main():
         print("Catalog already up to date.")
         return 0
 
+    summary_lines = build_summary(
+        cat.get("open_latest", []), new_open_latest,
+        cat.get("branches", {}), new_branches,
+    )
     print("Catalog changes:")
-    if new_open_latest != cat.get("open_latest"):
-        print(f"  open_latest: {cat.get('open_latest')} -> {new_open_latest}")
-    for name, b in new_branches.items():
-        old = cat.get("branches", {}).get(name, {}).get("version")
-        if old and old != b.get("version"):
-            print(f"  {name}: {old} -> {b['version']}")
+    for line in summary_lines:
+        print(f"  {line}")
+
+    # Hand the change set to the workflow (commit body / release notes / issue)
+    # so downstream consumers can say exactly what changed.
+    summary_file = get_opt("--summary-file")
+    if summary_file:
+        with open(summary_file, "w") as f:
+            f.write("\n".join(summary_lines) + "\n")
 
     if check_only:
         print("(--check) catalog is stale", file=sys.stderr)

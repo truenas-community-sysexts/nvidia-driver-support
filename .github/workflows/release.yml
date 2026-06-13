@@ -32,6 +32,11 @@ on:
           - 'true'
           - 'false'
         default: 'false'
+      change_summary:
+        description: 'Markdown summary of catalog changes (auto-filled by check-drivers; leave empty for manual tooling releases)'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: write
@@ -55,6 +60,7 @@ jobs:
           RUN_NUMBER: ${{ github.run_number }}
           COMMIT_SHA: ${{ github.sha }}
           REPO: ${{ github.repository }}
+          CHANGE_SUMMARY: ${{ inputs.change_summary }}
         run: |
           set -euo pipefail
           # Build the notes from the catalog + CI smoke target so the "supported"
@@ -72,7 +78,11 @@ jobs:
           open_latest = ", ".join(f"`{v}`" for v in cat.get("open_latest", []))
           tn = tracked["truenas"]["version"]
           raw = f"https://raw.githubusercontent.com/{repo}/main/scripts/install-nvidia-driver.sh"
-          parts = [
+          change = os.environ.get("CHANGE_SUMMARY", "").strip()
+          parts = []
+          if change:
+              parts += ["### What changed", change, ""]
+          parts += [
               "The **NVIDIA driver installer** for TrueNAS — the MIT install scripts + the driver catalog. It does **not** ship a prebuilt driver (NVIDIA's EULA bars redistributing the proprietary userspace): the installer detects your card and builds the right driver **on your host**, so this single release covers the whole supported matrix:",
               "",
               f"- **Open drivers** (Turing+): {open_latest}",
@@ -141,9 +151,11 @@ jobs:
         uses: actions/github-script@v9
         env:
           RUN_NUMBER: ${{ github.run_number }}
+          CHANGE_SUMMARY: ${{ inputs.change_summary }}
         with:
           script: |
             const tag = `v${process.env.RUN_NUMBER}`;
+            const change = (process.env.CHANGE_SUMMARY || '').trim();
             const { owner, repo } = context.repo;
             const releaseUrl = `https://github.com/${owner}/${repo}/releases/tag/${tag}`;
             const title = `Hardware test: NVIDIA driver installer ${tag}`;
@@ -162,6 +174,7 @@ jobs:
                 ``,
                 `**Release:** [${tag}](${releaseUrl})`,
                 `<!-- release-tag: ${tag} -->`,
+                ...(change ? [``, `### What changed`, change] : []),
                 ``,
                 `### Install THIS build to test it`,
                 `It is a **pre-release**, so the default install uses the current Latest tooling/catalog, not this build. Pin this build with \`--release\`:`,
