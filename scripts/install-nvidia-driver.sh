@@ -1281,7 +1281,9 @@ except Exception:
         N=$(/usr/bin/nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | grep -c '[0-9]' || true)
         N=${N:-0}
         if [ "${N:-0}" -eq 0 ]; then printf "\r  GPU compute clients released                              \n"; break; fi
-        printf "\r  Waiting for %d GPU process(es)... %ds/30s" "$N" "$((attempt * 3))"; sleep 3
+        # Fixed-width field clears the longer "0s/30s" placeholder line above;
+        # a bare \r redraw would leave its tail ("...se... 0s/30s") on screen.
+        printf "\r  %-52s" "Waiting for $N GPU process(es)... $((attempt * 3))s/30s"; sleep 3
     done
     if [ "${N:-0}" -gt 0 ]; then
         echo ""
