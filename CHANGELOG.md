@@ -6,6 +6,17 @@ All notable changes to `nvidia-driver-support` are documented here.
 
 ### Fixed
 
+- **`cleanup_tmp` no longer fires twice on Ctrl-C / SIGTERM.** The trap caught `EXIT INT TERM`
+  but the handler never disarmed or exited, so a signal ran it once via INT/TERM and then again
+  via EXIT. The second pass called `app.start` on already-running apps (bogus "could not restart,
+  start it from the Apps UI" warnings) and printed the rollback banner twice. Worse, after the
+  INT handler returned the script resumed into the driver swap, so a Ctrl-C during the GPU-drain
+  wait did not actually abort. Fixed by disarming (`trap - EXIT INT TERM`) and `exit "$rc"` at the
+  top and bottom of the handler, plus clearing `STOPPED_APPS`/`STOPPING_APP` after the rollback to
+  match the flag-reset idiom used in the sibling scripts.
+- **`build-on-host.sh` restores the docker daemon on Ctrl-C.** Its `restore_docker_state` trap
+  caught only `EXIT`, so an interrupted build left docker running when it had been stopped before
+  the build. Now catches `INT`/`TERM` too, with the same disarm + exit.
 - **`install-nvidia-driver.sh` now restores the GPU release it does before the swap.** To
   free the GPU the install stops GPU-bound apps (`app.stop`) and toggles `docker.config.nvidia`
   off — but it never turned them back on, so after the swap + reboot apps came back with the

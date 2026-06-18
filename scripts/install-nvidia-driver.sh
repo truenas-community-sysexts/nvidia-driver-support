@@ -1098,6 +1098,13 @@ restart_stopped_apps() {
 
 cleanup_tmp() {
     local rc=$?
+    # Disarm before doing anything: a trapped INT/TERM runs this handler and
+    # then the EXIT trap runs it a second time, re-firing the non-idempotent
+    # app restart below (app.start on already-running apps -> bogus "could not
+    # restart" warnings + a doubled rollback banner). Disarming makes it run
+    # exactly once; the exit "$rc" at the end also stops the script resuming
+    # into the driver swap after a Ctrl-C, so an abort actually aborts.
+    trap - EXIT INT TERM
     # Always put /usr back read-only if we left it writable.
     if [ "$USR_WAS_WRITABLE" = "1" ] && [ -n "$USR_DATASET" ]; then
         zfs set readonly=on "$USR_DATASET" 2>/dev/null || true
@@ -1118,6 +1125,7 @@ cleanup_tmp() {
                 echo "Install aborted before the driver swap — rolling back the GPU release..." >&2
                 restore_docker_nvidia
                 restart_stopped_apps
+                STOPPED_APPS=""; STOPPING_APP=""   # clear after acting (matches the flag-reset idiom)
             fi
         else
             # Post-swap: the live driver may be half-swapped. Do NOT restart
@@ -1136,6 +1144,7 @@ cleanup_tmp() {
             fi
         fi
     fi
+    exit "$rc"
 }
 trap cleanup_tmp EXIT INT TERM
 
