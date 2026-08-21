@@ -156,8 +156,14 @@ if [ -n "$RUN_FILE_OVERRIDE" ]; then
         info "staging --run-file → ${RUN_CACHE}"
         cp -L "$RUN_FILE_OVERRIDE" "$RUN_CACHE"
         chmod +x "$RUN_CACHE"
-        # A custom run must not be judged against a previous download's hash.
-        rm -f "${RUN_CACHE}.sha256"
+        # Carry a sibling recorded hash along (a verified --run-url download
+        # writes one); otherwise drop any stale hash so a custom run is not
+        # judged against a previous download's.
+        if [ -f "${RUN_FILE_OVERRIDE}.sha256" ]; then
+            cp -L "${RUN_FILE_OVERRIDE}.sha256" "${RUN_CACHE}.sha256"
+        else
+            rm -f "${RUN_CACHE}.sha256"
+        fi
     fi
 fi
 
@@ -178,14 +184,15 @@ fi
 #   /work/out         ← output dir (we copy nvidia.raw out)
 #
 # build-nvidia-sysext.sh works in a per-run mktemp dir but bridges the two
-# large downloads through fixed /tmp paths (UPDATE_FILE and RUN_STAGE) —
-# container-ephemeral, gone on --rm. We bridge:
-#   /work/cache/truenas-<ver>.update  →  /tmp/truenas.update (--update-file=)
-#   /work/cache/NVIDIA-Linux-...run   →  --run-file= (staged to /tmp by the
-#                                        build script; skips Phase 3 download)
+# large downloads through its fixed STAGE_DIR (/var/cache/nvidia-sysext-stage,
+# container-ephemeral, gone on --rm). We bridge:
+#   /work/cache/truenas-<ver>.update  →  STAGE_DIR/truenas.update (--update-file=)
+#   /work/cache/NVIDIA-Linux-...run   →  --run-file= (staged into STAGE_DIR by
+#                                        the build script; skips Phase 3 download)
 # plus the recorded .sha256 files next to each, so the build script
 # re-verifies cached payloads instead of trusting them.
 # ─────────────────────────────────────────────────────────────────────────
+STAGE_IN="/var/cache/nvidia-sysext-stage"
 
 # Build-time deps for the script's Phase 4 cross-compile and squashfs ops.
 # These are not on a fresh ubuntu:24.04; ~250 MB of packages, ~2 min the
@@ -212,13 +219,15 @@ ${APT_INSTALL}
 # Stage cached TrueNAS .update if present (build script's --update-file=
 # skips its own download phase), plus its recorded checksum so the build
 # script re-verifies the cached copy.
+mkdir -p ${STAGE_IN}
+chmod 0700 ${STAGE_IN}
 EXTRA_ARGS=()
 if [ -f /work/cache/$(basename "$UPDATE_CACHE") ]; then
-    cp /work/cache/$(basename "$UPDATE_CACHE") /tmp/truenas.update
+    cp /work/cache/$(basename "$UPDATE_CACHE") ${STAGE_IN}/truenas.update
     if [ -f /work/cache/$(basename "$UPDATE_CACHE").sha256 ]; then
-        cp /work/cache/$(basename "$UPDATE_CACHE").sha256 /tmp/truenas.update.sha256
+        cp /work/cache/$(basename "$UPDATE_CACHE").sha256 ${STAGE_IN}/truenas.update.sha256
     fi
-    EXTRA_ARGS+=(--update-file=/tmp/truenas.update)
+    EXTRA_ARGS+=(--update-file=${STAGE_IN}/truenas.update)
 fi
 
 # Hand the cached NVIDIA .run to the build script's --run-file staging; it
@@ -234,11 +243,21 @@ fi
     --truenas-codename=${TRUENAS_CODENAME}} \\
     --out=/work/out
 
-# Backfill cache with anything the build downloaded (checksums included).
-[ -f /tmp/truenas.update ] && cp /tmp/truenas.update /work/cache/$(basename "$UPDATE_CACHE") || true
-[ -f /tmp/truenas.update.sha256 ] && cp /tmp/truenas.update.sha256 /work/cache/$(basename "$UPDATE_CACHE").sha256 || true
-[ -f /tmp/${RUN_BASENAME} ] && cp /tmp/${RUN_BASENAME} /work/cache/${RUN_BASENAME} || true
-[ -f /tmp/${RUN_BASENAME}.sha256 ] && cp /tmp/${RUN_BASENAME}.sha256 /work/cache/${RUN_BASENAME}.sha256 || true
+# Backfill only genuinely fresh downloads (never rewrite the multi-GB cache
+# entries the build just read), checksum sidecars first so an interrupted
+# payload copy fails the next re-verification instead of passing silently.
+if [ ! -f /work/cache/$(basename "$UPDATE_CACHE") ] && [ -f ${STAGE_IN}/truenas.update ]; then
+    if [ -f ${STAGE_IN}/truenas.update.sha256 ]; then
+        cp ${STAGE_IN}/truenas.update.sha256 /work/cache/$(basename "$UPDATE_CACHE").sha256
+    fi
+    cp ${STAGE_IN}/truenas.update /work/cache/$(basename "$UPDATE_CACHE")
+fi
+if [ ! -f /work/cache/${RUN_BASENAME} ] && [ -f ${STAGE_IN}/${RUN_BASENAME} ]; then
+    if [ -f ${STAGE_IN}/${RUN_BASENAME}.sha256 ]; then
+        cp ${STAGE_IN}/${RUN_BASENAME}.sha256 /work/cache/${RUN_BASENAME}.sha256
+    fi
+    cp ${STAGE_IN}/${RUN_BASENAME} /work/cache/${RUN_BASENAME}
+fi
 EOF
 )
 

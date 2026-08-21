@@ -55,7 +55,7 @@ for arg in "$@"; do
         --run-file=*) RUN_FILE_OVERRIDE="${arg#*=}" ;;
         --out=*) OUT_DIR="${arg#*=}" ;;
         -h|--help)
-            sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *) echo "Unknown arg: $arg" >&2; exit 2 ;;
@@ -69,6 +69,13 @@ fi
 
 [ -n "$NVIDIA_VERSION" ] || { echo "ERROR: --nvidia-version=X.Y.Z required" >&2; exit 1; }
 [ -n "$TRUENAS_VERSION" ] || { echo "ERROR: --truenas-version=X.Y.Z required" >&2; exit 1; }
+
+# Resolve now: Phase 3 runs after a cd into $BUILD_DIR, where a relative
+# --run-file would no longer point at the caller's file.
+if [ -n "$RUN_FILE_OVERRIDE" ]; then
+    [ -f "$RUN_FILE_OVERRIDE" ] || { echo "ERROR: --run-file not found: $RUN_FILE_OVERRIDE" >&2; exit 1; }
+    RUN_FILE_OVERRIDE="$(readlink -f "$RUN_FILE_OVERRIDE")"
+fi
 
 # Absolute, captured BEFORE any chdir (Phase 3 cds into $BUILD_DIR) so paths
 # next to this script still resolve in later phases (e.g. Phase 5b bundling).
@@ -102,10 +109,14 @@ STAGE1_DIR="${WORK_ROOT}/stage1"
 ROOTFS_DIR="${WORK_ROOT}/rootfs"
 BUILD_DIR="${WORK_ROOT}/nvidia_build"
 STAGING_DIR="${WORK_ROOT}/staging"
-# UPDATE_FILE keeps a fixed /tmp path on purpose: the CI workflow caches it by
-# that exact path (build-sysext.yml), so randomizing it would break the cache.
-# Overridable via --update-file=.
-UPDATE_FILE="/tmp/truenas.update"
+# Fixed, root-owned staging dir bridging the two large downloads across runs
+# (and, under build-on-host, across container invocations). Rooted in
+# /var/cache so an unprivileged user cannot pre-create or symlink the paths
+# this script trusts and executes as root. Overridable via --update-file=.
+STAGE_DIR="/var/cache/nvidia-sysext-stage"
+mkdir -p "$STAGE_DIR" || { echo "ERROR: cannot create $STAGE_DIR (need root)" >&2; exit 1; }
+chmod 0700 "$STAGE_DIR"
+UPDATE_FILE="${STAGE_DIR}/truenas.update"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Logging
@@ -325,20 +336,35 @@ else
         || die "Cannot build .update URL for $TRUENAS_VERSION (pass --truenas-codename or --update-file)"
     # Sidecar sits next to the .update; any ?download=1 query must stay after
     # the .sha256 suffix, not inside the path. Fetched before the ~2 GB
-    # download so a missing sidecar fails fast.
+    # download so a missing sidecar fails fast. Like the .run below, only a
+    # definitive 404 (a server that publishes no sidecar) downgrades to a
+    # warning; every other checksum failure is fatal.
     SHA_URL="${URL%%\?*}.sha256"
     case "$URL" in *\?*) SHA_URL="${SHA_URL}?${URL#*\?}" ;; esac
-    EXPECTED_SHA="$(fetch_expected_sha "$SHA_URL")" \
-        || die "Failed to fetch .update checksum: $SHA_URL"
+    UPDATE_SHA_STATUS="$(curl -sL -o /dev/null --retry 3 --max-time 30 -w '%{http_code}' \
+        "$SHA_URL" || true)"
+    EXPECTED_SHA=""
+    if [ "$UPDATE_SHA_STATUS" = "404" ]; then
+        warn "No .sha256 sidecar published at ${SHA_URL}; proceeding unverified"
+    else
+        EXPECTED_SHA="$(fetch_expected_sha "$SHA_URL")" \
+            || die "Failed to fetch .update checksum: $SHA_URL (HTTP ${UPDATE_SHA_STATUS})"
+    fi
+    # Drop any stale recorded hash before the download replaces the payload.
+    rm -f "${UPDATE_FILE}.sha256"
     info "Downloading: $URL"
     wget -q --show-progress -O "$UPDATE_FILE" "$URL" \
         || die "Failed to download .update file"
-    ACTUAL_SHA="$(sha256sum "$UPDATE_FILE" | awk '{print $1}')"
-    [ "$EXPECTED_SHA" = "$ACTUAL_SHA" ] \
-        || die ".update SHA256 mismatch: expected ${EXPECTED_SHA}, got ${ACTUAL_SHA}"
-    # Record next to the file so cached reuse (--update-file) re-verifies.
-    printf '%s  %s\n' "$EXPECTED_SHA" "$(basename "$UPDATE_FILE")" > "${UPDATE_FILE}.sha256"
-    ok "Downloaded $(du -h "$UPDATE_FILE" | cut -f1), SHA256 verified"
+    if [ -n "$EXPECTED_SHA" ]; then
+        ACTUAL_SHA="$(sha256sum "$UPDATE_FILE" | awk '{print $1}')"
+        [ "$EXPECTED_SHA" = "$ACTUAL_SHA" ] \
+            || die ".update SHA256 mismatch: expected ${EXPECTED_SHA}, got ${ACTUAL_SHA}"
+        # Record next to the file so cached reuse (--update-file) re-verifies.
+        printf '%s  %s\n' "$EXPECTED_SHA" "$(basename "$UPDATE_FILE")" > "${UPDATE_FILE}.sha256"
+        ok "Downloaded $(du -h "$UPDATE_FILE" | cut -f1), SHA256 verified"
+    else
+        ok "Downloaded $(du -h "$UPDATE_FILE" | cut -f1) (unverified)"
+    fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -435,22 +461,24 @@ banner "Phase 3: Download NVIDIA $NVIDIA_VERSION installer"
 cd "$BUILD_DIR"
 RUN_FILE="NVIDIA-Linux-x86_64-${NVIDIA_VERSION}-no-compat32.run"
 NV_URL="https://us.download.nvidia.com/XFree86/Linux-x86_64/${NVIDIA_VERSION}/${RUN_FILE}"
-# Fixed staging path on purpose, mirroring UPDATE_FILE: build-on-host bridges
-# its cache and --run-file through it and backfills from it after the build
-# ($BUILD_DIR is a per-run mktemp dir nothing outside this script can reach).
-RUN_STAGE="/tmp/${RUN_FILE}"
+# Staged in the fixed root-owned STAGE_DIR, mirroring UPDATE_FILE:
+# build-on-host bridges its cache and --run-file through it and backfills
+# from it after the build ($BUILD_DIR is a per-run mktemp dir nothing
+# outside this script can reach).
+RUN_STAGE="${STAGE_DIR}/${RUN_FILE}"
 
 if [ -n "$RUN_FILE_OVERRIDE" ]; then
     [ -f "$RUN_FILE_OVERRIDE" ] || die "--run-file not found: $RUN_FILE_OVERRIDE"
     if [ "$(readlink -f "$RUN_FILE_OVERRIDE")" != "$(readlink -f "$RUN_STAGE" 2>/dev/null || echo)" ]; then
-        cp -L "$RUN_FILE_OVERRIDE" "$RUN_STAGE"
         # Carry the override's recorded hash along; otherwise drop any stale
         # one so a custom run isn't judged against an old download's hash.
+        # Sidecar first: an interrupted payload copy must be detectable.
         if [ -f "${RUN_FILE_OVERRIDE}.sha256" ]; then
             cp -L "${RUN_FILE_OVERRIDE}.sha256" "${RUN_STAGE}.sha256"
         else
             rm -f "${RUN_STAGE}.sha256"
         fi
+        cp -L "$RUN_FILE_OVERRIDE" "$RUN_STAGE"
     fi
 fi
 
@@ -461,7 +489,7 @@ if [ -f "$RUN_STAGE" ]; then
         EXPECTED_RUN_SHA="$(awk '{print $1; exit}' "${RUN_STAGE}.sha256")"
         ACTUAL_RUN_SHA="$(sha256sum "$RUN_STAGE" | awk '{print $1}')"
         [ "$EXPECTED_RUN_SHA" = "$ACTUAL_RUN_SHA" ] \
-            || die "Staged ${RUN_STAGE} fails its recorded SHA256; delete it and its .sha256, then re-run"
+            || die "Staged ${RUN_STAGE} fails its recorded SHA256; delete it and its .sha256 (under build-on-host: the copies in its cache dir, default /var/cache/nvidia-build), then re-run"
         ok "Staged run file SHA256 verified"
     else
         info "Using staged run file (no recorded checksum): $RUN_STAGE"
@@ -474,7 +502,7 @@ else
     # version. Every other checksum failure fails the build.
     # curl emits the -w %{http_code} (000) even on transport failure; || true
     # only keeps set -e from aborting the probe.
-    SHA_STATUS="$(curl -s -o /dev/null --retry 3 --max-time 30 -w '%{http_code}' \
+    SHA_STATUS="$(curl -sL -o /dev/null --retry 3 --max-time 30 -w '%{http_code}' \
         "${NV_URL}.sha256sum" || true)"
     EXPECTED_RUN_SHA=""
     if [ "$SHA_STATUS" = "404" ]; then
@@ -493,10 +521,14 @@ else
     fi
     # Stage for reuse (build-on-host backfills its cache from here), with the
     # verified hash recorded so the next run re-checks instead of trusting.
-    cp "$RUN_FILE" "$RUN_STAGE"
+    # Sidecar first: an interrupted payload copy then fails the re-check
+    # instead of passing as an unrecorded custom run.
     if [ -n "$EXPECTED_RUN_SHA" ]; then
         printf '%s  %s\n' "$EXPECTED_RUN_SHA" "$RUN_FILE" > "${RUN_STAGE}.sha256"
+    else
+        rm -f "${RUN_STAGE}.sha256"
     fi
+    cp "$RUN_FILE" "$RUN_STAGE"
 fi
 chmod +x "$RUN_FILE"
 ok "NVIDIA installer: $BUILD_DIR/$RUN_FILE"

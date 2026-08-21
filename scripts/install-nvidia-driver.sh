@@ -873,6 +873,9 @@ if [ -n "$RUN_URL" ]; then
                 exit 1
             }
             echo "SHA256 verified against ${_sha_url}"
+            # Recorded next to the file so the build cache chain (rebuilds of
+            # this version via build-on-host) re-verifies instead of trusting.
+            printf '%s  %s\n' "$_expected" "$_run_base" > "${CUSTOM_RUN}.sha256"
         else
             echo "WARNING: no usable checksum sidecar at ${_sha_url}; proceeding unverified" >&2
         fi
