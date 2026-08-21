@@ -26,7 +26,7 @@ jobs:
     name: shellcheck shell scripts
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Run shellcheck
         run: |
           shellcheck --severity=warning \
@@ -42,14 +42,14 @@ jobs:
     name: driver-catalog.json shape
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - run: .github/scripts/validate-catalog.sh
 
   tracked-versions:
     name: tracked-versions.json shape
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Validate tracked-versions.json
         run: |
           python3 - <<'PY'
@@ -68,7 +68,7 @@ jobs:
     name: actionlint workflows
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Download actionlint
         run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
       - name: Run actionlint
