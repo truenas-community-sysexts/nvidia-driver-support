@@ -58,7 +58,7 @@ jobs:
       matrix: ${{ steps.set.outputs.matrix }}
       truenas: ${{ steps.set.outputs.truenas }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Build the version matrix
         id: set
         env:
@@ -130,7 +130,7 @@ jobs:
     # required build.
     continue-on-error: ${{ matrix.experimental || false }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # legacy-470 builds from the nvidia-470xx-linux-mainline patch
           # submodule under third_party/.
