@@ -5,7 +5,7 @@
   "open_latest": [
     "595.58.03",
     "590.48.01",
-    "580.159.04",
+    "580.178.04",
     "575.64.05",
     "570.211.01"
   ],
@@ -17,7 +17,7 @@
       "note": "Newest open-module driver in open_latest (Turing and newer)."
     },
     "legacy-580": {
-      "version": "580.159.04",
+      "version": "580.178.04",
       "kmod": "proprietary",
       "chips": [
         "GM",
