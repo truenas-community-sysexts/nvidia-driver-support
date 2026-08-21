@@ -23,6 +23,7 @@
 #        [--truenas-codename=Goldeye] \
 #        [--build-cc=gcc-14] \
 #        [--update-file=/path/to/preloaded.update] \
+#        [--run-file=/path/to/NVIDIA-Linux-x86_64-VER-no-compat32.run] \
 #        [--out=dist]
 #
 # Output:
@@ -40,6 +41,7 @@ NVIDIA_KERNEL_MODULE_TYPE="${NVIDIA_KERNEL_MODULE_TYPE:-open}"
 TRUENAS_CODENAME="${TRUENAS_CODENAME:-}"
 NVIDIA_BUILD_CC="${NVIDIA_BUILD_CC:-}"
 UPDATE_FILE_OVERRIDE=""
+RUN_FILE_OVERRIDE=""
 OUT_DIR=""
 
 for arg in "$@"; do
@@ -50,6 +52,7 @@ for arg in "$@"; do
         --truenas-codename=*) TRUENAS_CODENAME="${arg#*=}" ;;
         --build-cc=*) NVIDIA_BUILD_CC="${arg#*=}" ;;
         --update-file=*) UPDATE_FILE_OVERRIDE="${arg#*=}" ;;
+        --run-file=*) RUN_FILE_OVERRIDE="${arg#*=}" ;;
         --out=*) OUT_DIR="${arg#*=}" ;;
         -h|--help)
             sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
@@ -306,7 +309,17 @@ mkdir -p "$STAGE1_DIR" "$ROOTFS_DIR" "$BUILD_DIR" "$STAGING_DIR"
 if [ -n "$UPDATE_FILE_OVERRIDE" ]; then
     [ -f "$UPDATE_FILE_OVERRIDE" ] || die "--update-file not found: $UPDATE_FILE_OVERRIDE"
     UPDATE_FILE="$UPDATE_FILE_OVERRIDE"
-    info "Using pre-loaded update file: $UPDATE_FILE"
+    # A sibling .sha256 exists only when a previous run of this script
+    # verified and recorded it; re-checking catches cache truncation/bit-rot.
+    if [ -f "${UPDATE_FILE}.sha256" ]; then
+        EXPECTED_SHA="$(awk '{print $1; exit}' "${UPDATE_FILE}.sha256")"
+        ACTUAL_SHA="$(sha256sum "$UPDATE_FILE" | awk '{print $1}')"
+        [ "$EXPECTED_SHA" = "$ACTUAL_SHA" ] \
+            || die "Pre-loaded ${UPDATE_FILE} fails its recorded SHA256; delete it and its .sha256, then re-run"
+        ok "Pre-loaded update file SHA256 verified: $UPDATE_FILE"
+    else
+        info "Using pre-loaded update file (no recorded checksum): $UPDATE_FILE"
+    fi
 else
     URL="$(build_update_url "$TRUENAS_VERSION" "$TRUENAS_CODENAME")" \
         || die "Cannot build .update URL for $TRUENAS_VERSION (pass --truenas-codename or --update-file)"
@@ -323,6 +336,8 @@ else
     ACTUAL_SHA="$(sha256sum "$UPDATE_FILE" | awk '{print $1}')"
     [ "$EXPECTED_SHA" = "$ACTUAL_SHA" ] \
         || die ".update SHA256 mismatch: expected ${EXPECTED_SHA}, got ${ACTUAL_SHA}"
+    # Record next to the file so cached reuse (--update-file) re-verifies.
+    printf '%s  %s\n' "$EXPECTED_SHA" "$(basename "$UPDATE_FILE")" > "${UPDATE_FILE}.sha256"
     ok "Downloaded $(du -h "$UPDATE_FILE" | cut -f1), SHA256 verified"
 fi
 
@@ -420,9 +435,38 @@ banner "Phase 3: Download NVIDIA $NVIDIA_VERSION installer"
 cd "$BUILD_DIR"
 RUN_FILE="NVIDIA-Linux-x86_64-${NVIDIA_VERSION}-no-compat32.run"
 NV_URL="https://us.download.nvidia.com/XFree86/Linux-x86_64/${NVIDIA_VERSION}/${RUN_FILE}"
+# Fixed staging path on purpose, mirroring UPDATE_FILE: build-on-host bridges
+# its cache and --run-file through it and backfills from it after the build
+# ($BUILD_DIR is a per-run mktemp dir nothing outside this script can reach).
+RUN_STAGE="/tmp/${RUN_FILE}"
 
-if [ -f "$RUN_FILE" ]; then
-    info "Run file already present, skipping download"
+if [ -n "$RUN_FILE_OVERRIDE" ]; then
+    [ -f "$RUN_FILE_OVERRIDE" ] || die "--run-file not found: $RUN_FILE_OVERRIDE"
+    if [ "$(readlink -f "$RUN_FILE_OVERRIDE")" != "$(readlink -f "$RUN_STAGE" 2>/dev/null || echo)" ]; then
+        cp -L "$RUN_FILE_OVERRIDE" "$RUN_STAGE"
+        # Carry the override's recorded hash along; otherwise drop any stale
+        # one so a custom run isn't judged against an old download's hash.
+        if [ -f "${RUN_FILE_OVERRIDE}.sha256" ]; then
+            cp -L "${RUN_FILE_OVERRIDE}.sha256" "${RUN_STAGE}.sha256"
+        else
+            rm -f "${RUN_STAGE}.sha256"
+        fi
+    fi
+fi
+
+if [ -f "$RUN_STAGE" ]; then
+    # A recorded .sha256 exists only for files this script downloaded and
+    # verified; custom/patched runs have none and are used as given.
+    if [ -f "${RUN_STAGE}.sha256" ]; then
+        EXPECTED_RUN_SHA="$(awk '{print $1; exit}' "${RUN_STAGE}.sha256")"
+        ACTUAL_RUN_SHA="$(sha256sum "$RUN_STAGE" | awk '{print $1}')"
+        [ "$EXPECTED_RUN_SHA" = "$ACTUAL_RUN_SHA" ] \
+            || die "Staged ${RUN_STAGE} fails its recorded SHA256; delete it and its .sha256, then re-run"
+        ok "Staged run file SHA256 verified"
+    else
+        info "Using staged run file (no recorded checksum): $RUN_STAGE"
+    fi
+    cp "$RUN_STAGE" "$RUN_FILE"
 else
     # NVIDIA publishes no .sha256sum sidecar for many older versions
     # (e.g. 470.129.06, 510.47.03): a definitive 404 downgrades to a
@@ -446,6 +490,12 @@ else
         [ "$EXPECTED_RUN_SHA" = "$ACTUAL_RUN_SHA" ] \
             || die "SHA256 mismatch for ${RUN_FILE}: expected ${EXPECTED_RUN_SHA}, got ${ACTUAL_RUN_SHA}"
         ok "SHA256 verified for ${RUN_FILE}"
+    fi
+    # Stage for reuse (build-on-host backfills its cache from here), with the
+    # verified hash recorded so the next run re-checks instead of trusting.
+    cp "$RUN_FILE" "$RUN_STAGE"
+    if [ -n "$EXPECTED_RUN_SHA" ]; then
+        printf '%s  %s\n' "$EXPECTED_RUN_SHA" "$RUN_FILE" > "${RUN_STAGE}.sha256"
     fi
 fi
 chmod +x "$RUN_FILE"

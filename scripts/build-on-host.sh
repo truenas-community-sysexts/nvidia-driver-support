@@ -156,6 +156,8 @@ if [ -n "$RUN_FILE_OVERRIDE" ]; then
         info "staging --run-file → ${RUN_CACHE}"
         cp -L "$RUN_FILE_OVERRIDE" "$RUN_CACHE"
         chmod +x "$RUN_CACHE"
+        # A custom run must not be judged against a previous download's hash.
+        rm -f "${RUN_CACHE}.sha256"
     fi
 fi
 
@@ -175,13 +177,14 @@ fi
 #   /work/cache       ← persistent cache (truenas.update + .run file)
 #   /work/out         ← output dir (we copy nvidia.raw out)
 #
-# build-nvidia-sysext.sh uses /tmp/{stage1,rootfs,nvidia_build,staging,truenas.update}
-# inside the container — those are container-ephemeral and disappear on --rm.
-# We bridge:
+# build-nvidia-sysext.sh works in a per-run mktemp dir but bridges the two
+# large downloads through fixed /tmp paths (UPDATE_FILE and RUN_STAGE) —
+# container-ephemeral, gone on --rm. We bridge:
 #   /work/cache/truenas-<ver>.update  →  /tmp/truenas.update (--update-file=)
-#   /work/cache/NVIDIA-Linux-...run   →  /tmp/nvidia_build/NVIDIA-Linux-...run
-#                                        (placed before build script runs;
-#                                         skips Phase 3 download)
+#   /work/cache/NVIDIA-Linux-...run   →  --run-file= (staged to /tmp by the
+#                                        build script; skips Phase 3 download)
+# plus the recorded .sha256 files next to each, so the build script
+# re-verifies cached payloads instead of trusting them.
 # ─────────────────────────────────────────────────────────────────────────
 
 # Build-time deps for the script's Phase 4 cross-compile and squashfs ops.
@@ -207,19 +210,21 @@ set -euo pipefail
 ${APT_INSTALL}
 
 # Stage cached TrueNAS .update if present (build script's --update-file=
-# skips its own download phase).
+# skips its own download phase), plus its recorded checksum so the build
+# script re-verifies the cached copy.
 EXTRA_ARGS=()
 if [ -f /work/cache/$(basename "$UPDATE_CACHE") ]; then
     cp /work/cache/$(basename "$UPDATE_CACHE") /tmp/truenas.update
+    if [ -f /work/cache/$(basename "$UPDATE_CACHE").sha256 ]; then
+        cp /work/cache/$(basename "$UPDATE_CACHE").sha256 /tmp/truenas.update.sha256
+    fi
     EXTRA_ARGS+=(--update-file=/tmp/truenas.update)
 fi
 
-# Stage cached NVIDIA .run if present (build script's Phase 3 picks up
-# any file already at \$BUILD_DIR/NVIDIA-Linux-x86_64-*-no-compat32.run).
-mkdir -p /tmp/nvidia_build
+# Hand the cached NVIDIA .run to the build script's --run-file staging; it
+# picks up the sibling .sha256 and re-verifies recorded hashes itself.
 if [ -f /work/cache/${RUN_BASENAME} ]; then
-    cp /work/cache/${RUN_BASENAME} /tmp/nvidia_build/${RUN_BASENAME}
-    chmod +x /tmp/nvidia_build/${RUN_BASENAME}
+    EXTRA_ARGS+=(--run-file=/work/cache/${RUN_BASENAME})
 fi
 
 /work/scripts/build-nvidia-sysext.sh "\${EXTRA_ARGS[@]}" \\
@@ -229,9 +234,11 @@ fi
     --truenas-codename=${TRUENAS_CODENAME}} \\
     --out=/work/out
 
-# Backfill cache with anything the build downloaded.
+# Backfill cache with anything the build downloaded (checksums included).
 [ -f /tmp/truenas.update ] && cp /tmp/truenas.update /work/cache/$(basename "$UPDATE_CACHE") || true
-[ -f /tmp/nvidia_build/${RUN_BASENAME} ] && cp /tmp/nvidia_build/${RUN_BASENAME} /work/cache/${RUN_BASENAME} || true
+[ -f /tmp/truenas.update.sha256 ] && cp /tmp/truenas.update.sha256 /work/cache/$(basename "$UPDATE_CACHE").sha256 || true
+[ -f /tmp/${RUN_BASENAME} ] && cp /tmp/${RUN_BASENAME} /work/cache/${RUN_BASENAME} || true
+[ -f /tmp/${RUN_BASENAME}.sha256 ] && cp /tmp/${RUN_BASENAME}.sha256 /work/cache/${RUN_BASENAME}.sha256 || true
 EOF
 )
 
