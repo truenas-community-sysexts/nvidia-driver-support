@@ -111,6 +111,16 @@ info()   { echo "[INFO]  $*"; }
 ok()     { echo "[OK]    $*"; }
 warn()   { echo "[WARN]  $*" >&2; }
 die()    { echo "[FATAL] $*" >&2; exit 1; }
+
+# Fetch a checksum sidecar URL and echo the 64-hex digest from its first
+# field. Fails on transport error and on non-hash content (soft-404 pages),
+# so callers never mistake an HTML error body for a checksum.
+fetch_expected_sha() {
+    local sha
+    sha="$(curl -fsSL --retry 3 --max-time 60 "$1" | awk '{print $1; exit}')" || return 1
+    [[ "$sha" =~ ^[0-9a-fA-F]{64}$ ]] || return 1
+    printf '%s\n' "$sha" | tr '[:upper:]' '[:lower:]'
+}
 banner() { printf "\n==========================================================\n  %s\n==========================================================\n\n" "$*"; }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -300,10 +310,20 @@ if [ -n "$UPDATE_FILE_OVERRIDE" ]; then
 else
     URL="$(build_update_url "$TRUENAS_VERSION" "$TRUENAS_CODENAME")" \
         || die "Cannot build .update URL for $TRUENAS_VERSION (pass --truenas-codename or --update-file)"
+    # Sidecar sits next to the .update; any ?download=1 query must stay after
+    # the .sha256 suffix, not inside the path. Fetched before the ~2 GB
+    # download so a missing sidecar fails fast.
+    SHA_URL="${URL%%\?*}.sha256"
+    case "$URL" in *\?*) SHA_URL="${SHA_URL}?${URL#*\?}" ;; esac
+    EXPECTED_SHA="$(fetch_expected_sha "$SHA_URL")" \
+        || die "Failed to fetch .update checksum: $SHA_URL"
     info "Downloading: $URL"
     wget -q --show-progress -O "$UPDATE_FILE" "$URL" \
         || die "Failed to download .update file"
-    ok "Downloaded $(du -h "$UPDATE_FILE" | cut -f1)"
+    ACTUAL_SHA="$(sha256sum "$UPDATE_FILE" | awk '{print $1}')"
+    [ "$EXPECTED_SHA" = "$ACTUAL_SHA" ] \
+        || die ".update SHA256 mismatch: expected ${EXPECTED_SHA}, got ${ACTUAL_SHA}"
+    ok "Downloaded $(du -h "$UPDATE_FILE" | cut -f1), SHA256 verified"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -404,8 +424,29 @@ NV_URL="https://us.download.nvidia.com/XFree86/Linux-x86_64/${NVIDIA_VERSION}/${
 if [ -f "$RUN_FILE" ]; then
     info "Run file already present, skipping download"
 else
+    # NVIDIA publishes no .sha256sum sidecar for many older versions
+    # (e.g. 470.129.06, 510.47.03): a definitive 404 downgrades to a
+    # warning so --nvidia-version keeps accepting any installable
+    # version. Every other checksum failure fails the build.
+    # curl emits the -w %{http_code} (000) even on transport failure; || true
+    # only keeps set -e from aborting the probe.
+    SHA_STATUS="$(curl -s -o /dev/null --retry 3 --max-time 30 -w '%{http_code}' \
+        "${NV_URL}.sha256sum" || true)"
+    EXPECTED_RUN_SHA=""
+    if [ "$SHA_STATUS" = "404" ]; then
+        warn "NVIDIA publishes no checksum for ${RUN_FILE}; proceeding unverified"
+    else
+        EXPECTED_RUN_SHA="$(fetch_expected_sha "${NV_URL}.sha256sum")" \
+            || die "Failed to fetch checksum ${NV_URL}.sha256sum (HTTP ${SHA_STATUS})"
+    fi
     info "Downloading from $NV_URL"
     wget -q --show-progress -c "$NV_URL" || die "Failed to download $RUN_FILE"
+    if [ -n "$EXPECTED_RUN_SHA" ]; then
+        ACTUAL_RUN_SHA="$(sha256sum "$RUN_FILE" | awk '{print $1}')"
+        [ "$EXPECTED_RUN_SHA" = "$ACTUAL_RUN_SHA" ] \
+            || die "SHA256 mismatch for ${RUN_FILE}: expected ${EXPECTED_RUN_SHA}, got ${ACTUAL_RUN_SHA}"
+        ok "SHA256 verified for ${RUN_FILE}"
+    fi
 fi
 chmod +x "$RUN_FILE"
 ok "NVIDIA installer: $BUILD_DIR/$RUN_FILE"
