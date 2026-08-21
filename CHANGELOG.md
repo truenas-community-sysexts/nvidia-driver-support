@@ -22,6 +22,22 @@ All notable changes to `nvidia-driver-support` are documented here.
   - Phase-gated by a `SWAP_STARTED` flag; fully inert under `--dry-run`. `uninstall-nvidia-driver.sh`
     and `recover-stock-nvidia.sh` already had the `restore_state` trap, so no change there.
 
+- **Downloads are SHA256-verified** (previously fetched blind). `build-nvidia-sysext.sh`
+  checks the TrueNAS `.update` against the `.sha256` sidecar download.truenas.com publishes
+  next to it, and a fresh NVIDIA `.run` against NVIDIA's `.run.sha256sum`; sidecars are
+  fetched before the multi-GB transfers, mismatches are fatal, and only a definitive 404
+  (versions NVIDIA never published a sidecar for, e.g. 470.129.06) downgrades to a warning.
+  `--run-url` verifies when the host publishes a sidecar and warns otherwise. A hex guard
+  keeps proxy soft-404 pages from reading as checksums, and verified downloads record their
+  hash so cached reuse re-verifies instead of trusting (truncation/bit-rot fails the build).
+- **`build-on-host.sh` cache bridge repaired.** Cached and `--run-file` runs were staged at
+  a fixed `/tmp/nvidia_build/` path the build script no longer reads (its work dirs moved
+  under a per-run mktemp root), so a patched custom `.run` was silently replaced by a stock
+  download and the `.run` cache never backfilled. The build script now takes `--run-file=`
+  (mirroring `--update-file`) and bridges through root-owned `/var/cache/nvidia-sysext-stage`
+  (0700, no world-writable `/tmp` paths trusted or executed as root). Backfill copies only
+  genuinely fresh downloads instead of rewriting multi-GB cache entries every build.
+
 ### Added
 
 - **Persistent build logs.** The on-host build runs in a `--rm` container, so a failed
