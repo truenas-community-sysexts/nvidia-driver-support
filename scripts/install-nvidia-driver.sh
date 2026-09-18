@@ -1097,14 +1097,20 @@ restart_stopped_apps() {
 }
 
 cleanup_tmp() {
-    local rc=$?
+    # Signal traps pass an explicit code (130/143): $? would be the status of
+    # whatever command the signal interrupted, often 0, which would skip the
+    # rollback below and exit 0.
+    local rc=${1:-$?}
     # Disarm before doing anything: a trapped INT/TERM runs this handler and
     # then the EXIT trap runs it a second time, re-firing the non-idempotent
     # app restart below (app.start on already-running apps -> bogus "could not
     # restart" warnings + a doubled rollback banner). Disarming makes it run
     # exactly once; the exit "$rc" at the end also stops the script resuming
     # into the driver swap after a Ctrl-C, so an abort actually aborts.
-    trap - EXIT INT TERM
+    # INT/TERM are ignored (not reset to default) so a second Ctrl-C cannot
+    # kill the rollback halfway and leave apps stopped.
+    trap '' INT TERM
+    trap - EXIT
     # Always put /usr back read-only if we left it writable.
     if [ "$USR_WAS_WRITABLE" = "1" ] && [ -n "$USR_DATASET" ]; then
         zfs set readonly=on "$USR_DATASET" 2>/dev/null || true
@@ -1146,7 +1152,9 @@ cleanup_tmp() {
     fi
     exit "$rc"
 }
-trap cleanup_tmp EXIT INT TERM
+trap cleanup_tmp EXIT
+trap 'cleanup_tmp 130' INT
+trap 'cleanup_tmp 143' TERM
 
 # ─────────────────────────────────────────────────────────────────────────
 # Sanity-check the driver sysext contents.

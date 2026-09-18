@@ -132,17 +132,21 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 restore_docker_state() {
-    local rc=$?
-    # Catch INT/TERM too (not just EXIT) so a Ctrl-C during the build still
-    # restores docker; disarm + exit so it runs exactly once.
-    trap - EXIT INT TERM
+    # Signal traps pass an explicit code (130/143) so a signal never exits 0.
+    local rc=${1:-$?}
+    # Handle INT/TERM explicitly with the same run-once handler: disarm + exit
+    # so it runs exactly once, and ignore further signals while restoring.
+    trap '' INT TERM
+    trap - EXIT
     if ! $DOCKER_WAS_RUNNING; then
         info "stopping docker daemon (was stopped before this build)"
         systemctl stop docker 2>/dev/null || warn "failed to stop docker"
     fi
     exit "$rc"
 }
-trap restore_docker_state EXIT INT TERM
+trap restore_docker_state EXIT
+trap 'restore_docker_state 130' INT
+trap 'restore_docker_state 143' TERM
 
 # ─────────────────────────────────────────────────────────────────────────
 # Cache setup. Update + run files survive between runs.
