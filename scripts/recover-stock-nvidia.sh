@@ -57,7 +57,7 @@ restore_state() {
         USR_WAS_WRITABLE=0
     fi
     if [ "$DOCKER_NVIDIA_DISABLED" = "1" ]; then
-        midclt call docker.update '{"nvidia": true}' >/dev/null 2>&1 || true
+        midclt call -j docker.update '{"nvidia": true}' >/dev/null 2>&1 || true
         DOCKER_NVIDIA_DISABLED=0
     fi
 }
@@ -252,7 +252,7 @@ if $DO_INSTALL; then
         echo ""
         echo "=== Installing stock nvidia.raw over current ==="
         echo "Stopping Docker so the GPU is free..."
-        midclt call docker.update '{"nvidia": false}' >/dev/null
+        midclt call -j docker.update '{"nvidia": false}' >/dev/null
         DOCKER_NVIDIA_DISABLED=1
 
         echo "Unmerging sysext..."
@@ -283,11 +283,12 @@ if $DO_INSTALL; then
         ln -sf "${SYSEXT_DIR}/nvidia.raw" /etc/extensions/nvidia.raw
 
         echo "Re-merging sysext..."
-        systemd-sysext merge
+        # refresh, not merge: tolerates /usr having been re-merged meanwhile.
+        systemd-sysext refresh
         systemctl daemon-reload
 
         echo "Re-enabling NVIDIA in Docker..."
-        midclt call docker.update '{"nvidia": true}' >/dev/null
+        midclt call -j docker.update '{"nvidia": true}' >/dev/null
         DOCKER_NVIDIA_DISABLED=0
 
         sleep 3

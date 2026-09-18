@@ -1077,7 +1077,7 @@ STOPPING_APP=""              # app currently mid app.stop (set before, cleared a
 restore_docker_nvidia() {
     [ "$DOCKER_NVIDIA_DISABLED" = "1" ] || return 0
     local want="${DOCKER_NVIDIA_PRIOR:-true}"
-    midclt call docker.update "{\"nvidia\": ${want}}" >/dev/null 2>&1 \
+    midclt call -j docker.update "{\"nvidia\": ${want}}" >/dev/null 2>&1 \
         && echo "  Restored docker.config.nvidia=${want}" >&2 \
         || echo "  WARN: could not restore docker.config.nvidia (set it manually)" >&2
     DOCKER_NVIDIA_DISABLED=0
@@ -1265,7 +1265,7 @@ except Exception:
     echo "  Disabling nvidia toolkit for docker (belt-and-suspenders)..."
     DOCKER_NVIDIA_PRIOR=$(midclt call docker.config 2>/dev/null \
         | python3 -c "import sys,json; print('true' if json.load(sys.stdin).get('nvidia') else 'false')" 2>/dev/null || echo true)
-    midclt call docker.update '{"nvidia": false}' >/dev/null \
+    midclt call -j docker.update '{"nvidia": false}' >/dev/null \
         && DOCKER_NVIDIA_DISABLED=1 \
         || echo "  WARN: docker.update returned an error — middleware may be flapping"
     printf "  Waiting for GPU compute clients to release... 0s/30s"
@@ -1293,7 +1293,7 @@ else
     echo "  nvidia-smi missing; toggling docker.nvidia=false only (no drain check)"
     DOCKER_NVIDIA_PRIOR=$(midclt call docker.config 2>/dev/null \
         | python3 -c "import sys,json; print('true' if json.load(sys.stdin).get('nvidia') else 'false')" 2>/dev/null || echo true)
-    midclt call docker.update '{"nvidia": false}' >/dev/null \
+    midclt call -j docker.update '{"nvidia": false}' >/dev/null \
         && DOCKER_NVIDIA_DISABLED=1 \
         || echo "  WARN: docker.update returned an error"
 fi
@@ -1332,7 +1332,12 @@ if_real mkdir -p /etc/extensions
 if_real ln -sf "$LIVE_NVIDIA" /etc/extensions/nvidia.raw
 
 echo "Re-merging sysext..."
-if_real systemd-sysext merge
+# refresh, not merge: docker.update runs TrueNAS's nvidia handler, which does
+# its own `systemd-sysext refresh`. -j above waits for that job, and refresh
+# stays correct even if something else merged /usr in the meantime (a plain
+# merge then fails with "Hierarchy '/usr' is already merged" and aborts the
+# install after the driver swap).
+if_real systemd-sysext refresh
 if_real systemctl daemon-reload
 
 # ─────────────────────────────────────────────────────────────────────────
