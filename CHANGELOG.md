@@ -6,6 +6,26 @@ All notable changes to `nvidia-driver-support` are documented here.
 
 ### Fixed
 
+- **Daily catalog refresh no longer flip-flops the latest open driver.** NVIDIA's
+  `latest.txt` is served through Akamai, and different edges held stale copies (595.58.03,
+  595.84, 595.91.07, 595.99.02), so each day's run could see a different "latest", rewrite
+  `open_latest`, and cut a new prerelease plus hardware-test issue (v41 to v77 were almost all
+  these flips). `refresh-catalog.py` now never lets the production ceiling drop below the one
+  already committed; a stale edge is logged and ignored, while a genuinely newer production
+  version still moves the catalog forward.
+- **`cleanup_tmp` no longer fires twice on Ctrl-C / SIGTERM.** The trap caught `EXIT INT TERM`
+  but the handler never disarmed or exited, so a signal ran it once via INT/TERM and then again
+  via EXIT. The second pass called `app.start` on already-running apps (bogus "could not restart,
+  start it from the Apps UI" warnings) and printed the rollback banner twice. Worse, after the
+  INT handler returned the script resumed into the driver swap, so a Ctrl-C during the GPU-drain
+  wait did not actually abort. Fixed by disarming at the top of the handler and `exit "$rc"` at
+  the bottom, plus clearing `STOPPED_APPS`/`STOPPING_APP` after the rollback to match the
+  flag-reset idiom used in the sibling scripts. INT/TERM pass explicit exit codes (130/143) so a
+  signal delivered only to the script (`kill <pid>`) cannot skip the rollback and exit 0, and
+  further signals are ignored while the rollback runs so a second Ctrl-C cannot cut it short.
+- **`build-on-host.sh` handles INT/TERM explicitly** with the same run-once handler and
+  130/143 exit codes (bash already ran its `EXIT` trap on a signal, so docker was restored; this
+  makes the behavior explicit and consistent).
 - **Install no longer aborts mid-swap with "Hierarchy '/usr' is already merged".** The
   installer toggled `docker.config.nvidia` with `midclt call docker.update` but without `-j`,
   so it did not wait for the job. That job runs TrueNAS's nvidia handler (its own
@@ -31,6 +51,22 @@ All notable changes to `nvidia-driver-support` are documented here.
     `recover-stock-nvidia.sh` recovery banner and list the apps left stopped.
   - Phase-gated by a `SWAP_STARTED` flag; fully inert under `--dry-run`. `uninstall-nvidia-driver.sh`
     and `recover-stock-nvidia.sh` already had the `restore_state` trap, so no change there.
+
+- **Downloads are SHA256-verified** (previously fetched blind). `build-nvidia-sysext.sh`
+  checks the TrueNAS `.update` against the `.sha256` sidecar download.truenas.com publishes
+  next to it, and a fresh NVIDIA `.run` against NVIDIA's `.run.sha256sum`; sidecars are
+  fetched before the multi-GB transfers, mismatches are fatal, and only a definitive 404
+  (versions NVIDIA never published a sidecar for, e.g. 470.129.06) downgrades to a warning.
+  `--run-url` verifies when the host publishes a sidecar and warns otherwise. A hex guard
+  keeps proxy soft-404 pages from reading as checksums, and verified downloads record their
+  hash so cached reuse re-verifies instead of trusting (truncation/bit-rot fails the build).
+- **`build-on-host.sh` cache bridge repaired.** Cached and `--run-file` runs were staged at
+  a fixed `/tmp/nvidia_build/` path the build script no longer reads (its work dirs moved
+  under a per-run mktemp root), so a patched custom `.run` was silently replaced by a stock
+  download and the `.run` cache never backfilled. The build script now takes `--run-file=`
+  (mirroring `--update-file`) and bridges through root-owned `/var/cache/nvidia-sysext-stage`
+  (0700, no world-writable `/tmp` paths trusted or executed as root). Backfill copies only
+  genuinely fresh downloads instead of rewriting multi-GB cache entries every build.
 
 ### Added
 

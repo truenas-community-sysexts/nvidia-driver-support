@@ -859,6 +859,26 @@ if [ -n "$RUN_URL" ]; then
         echo "Downloading custom .run from ${RUN_URL} ..."
         curl -fL --retry 3 -o "$CUSTOM_RUN" "$RUN_URL" \
             || { echo "ERROR: failed to download --run-url: $RUN_URL" >&2; exit 1; }
+        # Best-effort: NVIDIA's servers publish a .sha256sum sidecar; arbitrary
+        # hosts may not, and the flag stays usable there (with a warning).
+        # The hex guard keeps a soft-404 HTML page from reading as a mismatch.
+        _sha_url="${RUN_URL%%\?*}.sha256sum"
+        case "$RUN_URL" in *\?*) _sha_url="${_sha_url}?${RUN_URL#*\?}" ;; esac
+        _expected=$(curl -fsSL --retry 3 --max-time 30 "$_sha_url" \
+            | awk '{print $1; exit}' | tr '[:upper:]' '[:lower:]') || _expected=""
+        if [[ "$_expected" =~ ^[0-9a-f]{64}$ ]]; then
+            _actual=$(sha256sum "$CUSTOM_RUN" | awk '{print $1}')
+            [ "$_expected" = "$_actual" ] || {
+                echo "ERROR: SHA256 mismatch for --run-url download: expected ${_expected}, got ${_actual}" >&2
+                exit 1
+            }
+            echo "SHA256 verified against ${_sha_url}"
+            # Recorded next to the file so the build cache chain (rebuilds of
+            # this version via build-on-host) re-verifies instead of trusting.
+            printf '%s  %s\n' "$_expected" "$_run_base" > "${CUSTOM_RUN}.sha256"
+        else
+            echo "WARNING: no usable checksum sidecar at ${_sha_url}; proceeding unverified" >&2
+        fi
     fi
 fi
 
@@ -1097,7 +1117,20 @@ restart_stopped_apps() {
 }
 
 cleanup_tmp() {
-    local rc=$?
+    # Signal traps pass an explicit code (130/143): $? would be the status of
+    # whatever command the signal interrupted, often 0, which would skip the
+    # rollback below and exit 0.
+    local rc=${1:-$?}
+    # Disarm before doing anything: a trapped INT/TERM runs this handler and
+    # then the EXIT trap runs it a second time, re-firing the non-idempotent
+    # app restart below (app.start on already-running apps -> bogus "could not
+    # restart" warnings + a doubled rollback banner). Disarming makes it run
+    # exactly once; the exit "$rc" at the end also stops the script resuming
+    # into the driver swap after a Ctrl-C, so an abort actually aborts.
+    # INT/TERM are ignored (not reset to default) so a second Ctrl-C cannot
+    # kill the rollback halfway and leave apps stopped.
+    trap '' INT TERM
+    trap - EXIT
     # Always put /usr back read-only if we left it writable.
     if [ "$USR_WAS_WRITABLE" = "1" ] && [ -n "$USR_DATASET" ]; then
         zfs set readonly=on "$USR_DATASET" 2>/dev/null || true
@@ -1118,6 +1151,7 @@ cleanup_tmp() {
                 echo "Install aborted before the driver swap — rolling back the GPU release..." >&2
                 restore_docker_nvidia
                 restart_stopped_apps
+                STOPPED_APPS=""; STOPPING_APP=""   # clear after acting (matches the flag-reset idiom)
             fi
         else
             # Post-swap: the live driver may be half-swapped. Do NOT restart
@@ -1136,8 +1170,11 @@ cleanup_tmp() {
             fi
         fi
     fi
+    exit "$rc"
 }
-trap cleanup_tmp EXIT INT TERM
+trap cleanup_tmp EXIT
+trap 'cleanup_tmp 130' INT
+trap 'cleanup_tmp 143' TERM
 
 # ─────────────────────────────────────────────────────────────────────────
 # Sanity-check the driver sysext contents.
