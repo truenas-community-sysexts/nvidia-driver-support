@@ -12,6 +12,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from urllib.parse import urlparse
 
 from release_fixtures import release
 
@@ -19,19 +20,31 @@ ROOT = Path(__file__).resolve().parents[1]
 GET_SH = ROOT / "get.sh"
 INSTALL_SH = ROOT / "scripts" / "install-nvidia-driver.sh"
 
+
+def logged_host(line):
+    """Hostname of the URL in a stub-log line ("curl <url>"), or "" for other lines."""
+    parts = line.split()
+    if len(parts) > 1 and parts[0] == "curl":
+        return urlparse(parts[1]).hostname or ""
+    return ""
+
+
 CURL_STUB = textwrap.dedent("""\
     #!/usr/bin/env python3
     import json, os, re, sys
+    from urllib.parse import urlparse
     args = sys.argv[1:]
     url = args[-1]
     with open(os.environ["STUB_LOG"], "a") as f:
         f.write("curl " + url + "\\n")
-    if "api.github.com" in url:
-        page = int(re.search(r"[?&]page=(\\d+)", url).group(1))
+    parsed = urlparse(url)
+    host, path = parsed.hostname, parsed.path
+    if host == "api.github.com":
+        page = int(re.search(r"(?:^|&)page=(\\d+)", parsed.query).group(1))
         pages = json.load(open(os.environ["STUB_PAGES"]))
         print(json.dumps(pages[page - 1] if page <= len(pages) else []))
-    elif "/releases/download/" in url:
-        tag, asset = url.split("/releases/download/")[1].split("/")
+    elif host == "github.com" and "/releases/download/" in path:
+        tag, asset = path.split("/releases/download/")[1].split("/")
         with open(args[args.index("-o") + 1], "w") as f:
             f.write(f'#!/usr/bin/env bash\\necho "RAN {asset} from {tag} with: $*"\\n')
     else:
@@ -108,7 +121,8 @@ class GetSh(Stubbed):
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(p.stdout.strip(),
                          "RAN install-nvidia-driver.sh from v81 with: --check --release=v81")
-        self.assertFalse(any(c.startswith("midclt") or "api.github.com" in c
+        self.assertFalse(any(c.startswith("midclt")
+                             or logged_host(c) == "api.github.com"
                              for c in self.calls()), self.calls())
 
     def test_pinned_uninstall(self):
