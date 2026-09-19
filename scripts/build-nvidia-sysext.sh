@@ -268,7 +268,40 @@ select_installer_flags() {
 # the exact order from upstream's own extract_and_patch (minus the opt-in
 # staging/ patches), read live from the pinned checkout so a submodule bump
 # stays faithful with no duplicated list here to drift out of sync.
+#
+# Where the patch set comes from:
+#   1. third_party/nvidia-470xx-linux-mainline next to scripts/, when it is
+#      populated: a git checkout with submodules initialized, or a host copy
+#      build-on-host.sh mounted into the container.
+#   2. Otherwise it is downloaded at build time, on the user's own host, from
+#      upstream at PATCH_470XX_COMMIT. The install one-liner and --release
+#      stage only the scripts, so this is what they use. Upstream publishes no
+#      license, so this repo never ships the patches itself (e.g. as release
+#      assets); it only points at them.
+# PATCH_470XX_COMMIT must match the submodule's pinned commit (lint.yml checks).
+PATCH_470XX_URL="https://github.com/joanbm/nvidia-470xx-linux-mainline"
+PATCH_470XX_COMMIT="4cb394a4560ac25b0bd21411e26aacbc1b59e81f"
 PATCH_REPO="${REPO_ROOT}/third_party/nvidia-470xx-linux-mainline"
+
+# Point PATCH_REPO at a usable patch set, downloading the pinned upstream
+# commit when there is no populated local copy (an uninitialized submodule is
+# an empty directory). Sets PATCH_470XX_FROM for the log line.
+ensure_470xx_patch_set() {
+    local dest="${WORK_ROOT}/nvidia-470xx-linux-mainline"
+    if [ -f "${PATCH_REPO}/extract_and_patch" ]; then
+        PATCH_470XX_FROM="$(git -C "$PATCH_REPO" rev-parse --short HEAD 2>/dev/null || echo "local copy at ${PATCH_REPO}")"
+        return 0
+    fi
+    info "470 patch set not present at ${PATCH_REPO}; downloading ${PATCH_470XX_URL} at ${PATCH_470XX_COMMIT} ..."
+    mkdir -p "$dest"
+    curl -fsSL --retry 3 --max-time 120 "${PATCH_470XX_URL}/archive/${PATCH_470XX_COMMIT}.tar.gz" \
+        | tar -xz --strip-components=1 -C "$dest" \
+        || die "Failed to download the 470 patch set (${PATCH_470XX_URL} at ${PATCH_470XX_COMMIT})"
+    [ -f "${dest}/extract_and_patch" ] \
+        || die "Downloaded 470 patch set has no extract_and_patch (${PATCH_470XX_URL} at ${PATCH_470XX_COMMIT})"
+    PATCH_REPO="$dest"
+    PATCH_470XX_FROM="${PATCH_470XX_COMMIT:0:7}, downloaded"
+}
 
 # Echo the ordered, non-staging patch filenames (relative to patches/) that
 # upstream's extract_and_patch applies.
@@ -280,11 +313,9 @@ patch_470xx_series() {
 
 # Apply the 470xx patch series to an extracted driver's kernel/ source tree.
 apply_470xx_patches() {
-    local kernel_src="$1" p pinned
-    [ -f "${PATCH_REPO}/extract_and_patch" ] \
-        || die "470 patch set missing at ${PATCH_REPO} — initialize submodules (git submodule update --init)"
-    pinned="$(git -C "$PATCH_REPO" rev-parse --short HEAD 2>/dev/null || echo vendored)"
-    info "Patching 470 source with nvidia-470xx-linux-mainline (${pinned}) ..."
+    local kernel_src="$1" p
+    ensure_470xx_patch_set
+    info "Patching 470 source with nvidia-470xx-linux-mainline (${PATCH_470XX_FROM}) ..."
     while IFS= read -r p; do
         [ -n "$p" ] || continue
         info "  apply: $p"

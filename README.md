@@ -30,7 +30,7 @@ The picker reads [`catalog/driver-catalog.json`](catalog/driver-catalog.json) (r
 | Maxwell · Pascal · Volta — GTX 900/10-series, Quadro P-series, Titan V | `GM`/`GP`/`GV` | `legacy-580` | proprietary |
 | Kepler — GTX 600/700, Quadro K-series, Tesla K-series | `GK` | `legacy-470` | proprietary |
 
-All three tiers **build against TrueNAS's current 6.x kernel and are smoke-tested in CI** on every change. Kepler/`legacy-470` is EOL upstream and only compiles on 6.x thanks to a vendored community patch set ([`nvidia-470xx-linux-mainline`](https://github.com/joanbm/nvidia-470xx-linux-mainline)) this repo applies for you.
+All three tiers **build against TrueNAS's current 6.x kernel and are smoke-tested in CI** on every change. Kepler/`legacy-470` is EOL upstream and only compiles on 6.x thanks to a community patch set ([`nvidia-470xx-linux-mainline`](https://github.com/joanbm/nvidia-470xx-linux-mainline)) that the build downloads on your host, at a pinned commit, and applies for you.
 
 > **Older than Kepler?** **Fermi** (GTX 400/500, `GF` → 390.x) and **Tesla gen 1–2** (8/9/200-series, `G8x`/`G9x`/`GT2xx` → 340.x) are **not supported out of the box** — those EOL installers don't compile against the 6.x kernel and this repo ships **no** patches for them. You can still attempt one by supplying your own community-patched installer via `--custom-run` or `--run-url` (see [docs/legacy-cards.md](docs/legacy-cards.md)); expect to do the legwork.
 

@@ -9,6 +9,7 @@ on:
       - '.github/workflows/**.yml'
       - 'catalog/driver-catalog.json'
       - '.github/tracked-versions.json'
+      - 'third_party/**'
   pull_request:
     paths:
       - 'scripts/**.sh'
@@ -16,6 +17,7 @@ on:
       - '.github/workflows/**.yml'
       - 'catalog/driver-catalog.json'
       - '.github/tracked-versions.json'
+      - 'third_party/**'
   workflow_dispatch:
 
 permissions:
@@ -44,6 +46,25 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: .github/scripts/validate-catalog.sh
+
+  patch-pin:
+    name: 470 patch-set pin matches the submodule
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Compare PATCH_470XX_COMMIT with the third_party submodule commit
+        run: |
+          # On-host builds download the 470xx patch set at PATCH_470XX_COMMIT
+          # (build-nvidia-sysext.sh); the submodule is the reviewed pin. A bump
+          # must move both.
+          sub=$(git ls-tree HEAD third_party/nvidia-470xx-linux-mainline | awk '{print $3}')
+          pin=$(sed -nE 's/^PATCH_470XX_COMMIT="([0-9a-f]{40})"$/\1/p' scripts/build-nvidia-sysext.sh)
+          echo "submodule: ${sub:-<none>}"
+          echo "script:    ${pin:-<none>}"
+          if [ -z "$sub" ] || [ -z "$pin" ] || [ "$sub" != "$pin" ]; then
+            echo "::error::PATCH_470XX_COMMIT in scripts/build-nvidia-sysext.sh must equal the third_party/nvidia-470xx-linux-mainline submodule commit"
+            exit 1
+          fi
 
   tracked-versions:
     name: tracked-versions.json shape
