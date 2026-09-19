@@ -1,0 +1,41 @@
+name: Fork PR target check
+
+# Contributions flow: your fork > our dev > our main (see the org CONTRIBUTING.md).
+# A pull request from a fork that targets main is closed with a note asking
+# the contributor to open it against dev instead. It is not retargeted
+# automatically: if the fork's branch is based on an old main, switching the
+# base could drag in unrelated history, so the contributor re-bases it.
+# Maintainers' dev > main sync PRs come from branches in this repo, not forks,
+# so they are never touched.
+#
+# pull_request_target runs this file from the base branch with a write token.
+# That is safe here only because the job never checks out or runs anything
+# from the pull request: it reads the PR number from the event and nothing else.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, edited]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  close-fork-pr-to-main:
+    if: >-
+      github.event.pull_request.base.ref == github.event.repository.default_branch &&
+      github.event.pull_request.head.repo.full_name != github.repository &&
+      (github.event.action != 'edited' || github.event.changes.base != null)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Close with a note to open it against dev
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr close "$PR" -R "$REPO" --comment "$(cat <<'EOF'
+          Thanks for the contribution! Pull requests from forks go to our `dev` branch, not `main`: changes flow from your fork to `dev`, and maintainers move `dev` into `main`. See the [contributing guide](https://github.com/truenas-community-sysexts/.github/blob/main/CONTRIBUTING.md).
+
+          This PR targeted `main`, so it has been closed automatically. Please open a new pull request from your branch with `dev` as the base branch. If your branch was cut from an older `main`, sync your fork and update your branch from our `dev` first, so the PR only contains your change.
+          EOF
+          )"
