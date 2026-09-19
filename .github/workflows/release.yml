@@ -158,7 +158,17 @@ jobs:
             const change = (process.env.CHANGE_SUMMARY || '').trim();
             const { owner, repo } = context.repo;
             const releaseUrl = `https://github.com/${owner}/${repo}/releases/tag/${tag}`;
-            const title = `Hardware test: NVIDIA driver installer ${tag}`;
+            // Title: what to test | on what | which build. The tag goes last,
+            // verbatim: the duplicate check below matches on it. The drivers
+            // come from this commit's catalog (checked out above): the newest
+            // open driver, then each branch pinned to a version (the legacy
+            // ones), newest first.
+            const catalog = JSON.parse(require('fs').readFileSync('catalog/driver-catalog.json', 'utf8'));
+            const legacy = Object.values(catalog.branches || {})
+              .map((b) => b.version).filter(Boolean)
+              .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+            const also = legacy.length ? ` (also ${legacy.join(', ')})` : '';
+            const title = `Hardware test: NVIDIA driver ${catalog.open_latest[0]}${also} | any NVIDIA GPU, TrueNAS 25.10+ or 26 beta | installer ${tag}`;
             try {
               await github.rest.issues.createLabel({ owner, repo, name: 'hardware-test',
                 color: 'FBCA04', description: 'Build awaiting verification on real hardware' });
