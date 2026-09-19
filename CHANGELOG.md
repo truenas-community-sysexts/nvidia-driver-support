@@ -6,6 +6,29 @@ All notable changes to `nvidia-driver-support` are documented here.
 
 ### Fixed
 
+- **A stale stock backup is no longer restored.** `nvidia-original.raw` holds the stock driver
+  of the TrueNAS version it was made on; after an update that changed the kernel (seen on
+  hardware: a backup with `6.12.33-production+truenas` modules on a box running
+  `6.18.42-production+truenas`), restoring it would put a driver on the system that cannot
+  load. A backup now counts only if it has modules for the running kernel. The installer
+  refuses a stale backup exactly as it refuses a missing one (same `--skip-backup-check`
+  override), `--check` warns with the refresh command, the uninstaller refuses to restore it
+  (with `--skip-backup-check` it uninstalls without restoring stock, as with no backup), and
+  `recover-stock-nvidia.sh` never stages or installs a stock driver for another kernel. Refresh
+  a stale backup by running `recover-stock-nvidia.sh` without flags.
+- **`recover-stock-nvidia.sh` no longer resumes another version's download.** It resumed any
+  leftover `recovery/truenas.update` with `curl --continue-at -`, so a partial from an
+  interrupted run on an older TrueNAS could be extended with the new version's bytes, or taken
+  as complete, and the old version's stock driver extracted. The download URL is now recorded
+  next to the file and a partial with a different (or no) record is discarded; the download is
+  also checked against the `.sha256` sidecar TrueNAS publishes, as `build-nvidia-sysext.sh`
+  does.
+- **The post-install message says what to expect until the reboot.** When a working driver
+  is replaced, its kernel module stays loaded until the reboot: `nvidia-smi` fails with a
+  driver/library mismatch and the whole Apps service can fail to start, not just GPU apps. The
+  final message now says so (only when the loaded module is the previous driver's), lists the
+  GPU apps it stopped but could not restart (those stay stopped after the reboot) with the
+  command to start each, and says when the docker nvidia toggle could not be restored.
 - **Daily catalog refresh no longer flip-flops the latest open driver.** NVIDIA's
   `latest.txt` is served through Akamai, and different edges held stale copies (595.58.03,
   595.84, 595.91.07, 595.99.02), so each day's run could see a different "latest", rewrite
