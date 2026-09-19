@@ -3,6 +3,21 @@
 Run `sudo install-nvidia-driver.sh --check` first — it reports sysext merge state, kernel
 module load, sysext-vs-runtime driver version match, the stock backup, and the PREINIT entry.
 
+## `No release is approved for TrueNAS train <train> yet`
+
+`get.sh` (and `install-nvidia-driver.sh` run without `--release`) only installs a release that a
+hardware test approved for this box's TrueNAS train: the train is the major version from 26 on
+(every 26.x, betas included) and major.minor before that (25.10). No release is approved for
+this train yet, so it stopped rather than install something untested. The message lists the
+newest releases still waiting and links the open hardware-test issues; each issue title names
+its train. Testing one on this train and closing it as completed approves that release here.
+To install a specific release anyway, pin it (at your own risk):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-driver-support/main/get.sh \
+  | sudo bash -s -- --release=vN
+```
+
 ## `nvidia-smi: Driver/library version mismatch` right after install
 
 Expected — **you haven't rebooted yet**. The swap replaced the userspace libs but the old
@@ -30,7 +45,7 @@ The same update leaves the stock backup stale, so refresh it first (see
 one. Then rebuild against the new kernel:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-driver-support/main/scripts/install-nvidia-driver.sh \
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-driver-support/main/get.sh \
   | sudo bash -s -- --rebuild
 # or, using the staged helper (no network round-trip):
 sudo /mnt/<pool>/.config/nvidia-gpu/scripts/build-on-host.sh --help
