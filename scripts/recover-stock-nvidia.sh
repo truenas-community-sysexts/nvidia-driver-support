@@ -315,6 +315,9 @@ ERROR: the stock nvidia.raw extracted from ${UPDATE_FILE} is not for this kernel
        --version or --update-file, run without them to fetch the stock
        driver of the running TrueNAS version (read from /etc/version).
 EOF
+    # Same cleanup as a successful run: the download and the extraction are
+    # of no use for this kernel.
+    $KEEP_WORKDIR || rm -rf "$WORK"
     exit 1
 fi
 
