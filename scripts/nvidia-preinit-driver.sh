@@ -156,7 +156,7 @@ else
     if [ -n "$SYSEXT_KVER" ]; then
         log "ERROR: kernel-version mismatch — running ${RUNNING_KVER} but sysext bundles modules for ${SYSEXT_KVER}"
         log "ERROR: TrueNAS was likely updated to a new kernel. Rebuild nvidia.raw against ${RUNNING_KVER}:"
-        log "ERROR:   curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install-nvidia-driver.sh | sudo bash -s -- --rebuild"
+        log "ERROR:   curl -fsSL https://raw.githubusercontent.com/${REPO}/main/get.sh | sudo bash -s -- --rebuild"
         log "ERROR:   (the one-liner detects the new TrueNAS version and rebuilds the driver sysext on this host)"
         # Faster path if the build helpers are already staged from a prior install.
         PERSIST_SCRIPTS=""
