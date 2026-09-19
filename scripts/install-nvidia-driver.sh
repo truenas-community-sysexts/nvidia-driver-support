@@ -62,7 +62,8 @@
 #   --catalog=PATH        use a local catalog file instead of the bundled/remote one
 #   --pool=NAME           ZFS pool for persistent storage (/mnt/NAME/.config/nvidia-gpu)
 #   --persist-path=PATH   exact persist dir (must be /mnt/<pool>/.config/nvidia-gpu)
-#   --skip-backup-check   don't refuse if the nvidia-original.raw backup is missing
+#   --skip-backup-check   don't refuse if the nvidia-original.raw backup is missing,
+#                         or stale because an older TrueNAS with another kernel made it
 #                         (at your own risk — you may be unable to recover stock later)
 #   --yes                 assume "yes" to confirmations (non-interactive)
 #   --force               bypass kmod/architecture safety refusals and best-effort
@@ -289,6 +290,37 @@ cache_valid_for_target() {
     [ -n "$cached_drv" ] && [ "$cached_drv" = "$target_drv" ] || return 1
     [ -n "$cached_kver" ] && [ "$cached_kver" = "$running_kver" ] || return 1
     return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────
+# Stock-backup freshness. Duplicated verbatim in install-nvidia-driver.sh,
+# uninstall-nvidia-driver.sh and recover-stock-nvidia.sh (each stays a
+# self-contained curl|bash artifact); keep the copies in sync.
+#
+# nvidia-original.raw holds the stock driver of the TrueNAS version it was
+# made on. After a TrueNAS update that changed the kernel, its modules are for
+# the old kernel, and restoring it would put a driver on the system that
+# cannot load. It is usable only if it ships modules for the running kernel.
+# ─────────────────────────────────────────────────────────────────────────
+
+# Kernel versions a sysext image ships modules for (usr/lib/modules/<kver>/),
+# space-separated. Empty when it ships none or cannot be read.
+raw_module_kernels() {
+    unsquashfs -l "$1" 'usr/lib/modules/*' 2>/dev/null \
+        | sed -nE 's|^[^/]*/usr/lib/modules/([^/]+)/.*|\1|p' \
+        | sort -u | paste -sd ' ' - || true
+}
+
+# Why a stock nvidia.raw can't be restored on this system; prints nothing
+# when it can. "missing", or "stale:<kernels it has modules for>".
+stock_backup_problem() {
+    local raw="$1" kvers
+    [ -f "$raw" ] || { echo "missing"; return 0; }
+    kvers=$(raw_module_kernels "$raw")
+    case " ${kvers} " in
+        *" $(uname -r) "*) ;;
+        *) echo "stale:${kvers:-none found}" ;;
+    esac
 }
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -766,7 +798,14 @@ do_check() {
         record_fail "Custom-driver backup ${PERSIST_DIR}/nvidia.raw missing" "re-run install"
     fi
     if [ -n "${PERSIST_DIR:-}" ] && [ -f "${PERSIST_DIR}/nvidia-original.raw" ]; then
-        record_pass "Stock backup ${PERSIST_DIR}/nvidia-original.raw present"
+        local backup_problem
+        backup_problem=$(stock_backup_problem "${PERSIST_DIR}/nvidia-original.raw")
+        if [ -z "$backup_problem" ]; then
+            record_pass "Stock backup ${PERSIST_DIR}/nvidia-original.raw present (kernel $(uname -r))"
+        else
+            record_warn "Stock backup ${PERSIST_DIR}/nvidia-original.raw is stale (kernel modules for: ${backup_problem#stale:}; running: $(uname -r))" \
+                "refresh the stale stock backup (downloads about 2 GB): curl -fsSL ${RAW_BASE}/scripts/recover-stock-nvidia.sh | sudo bash"
+        fi
     elif [ -n "${PERSIST_DIR:-}" ]; then
         record_warn "No stock backup ${PERSIST_DIR}/nvidia-original.raw" \
             "you may be unable to recover stock — run recover-stock-nvidia.sh"
@@ -859,6 +898,26 @@ if [ -n "$RUN_URL" ]; then
         echo "Downloading custom .run from ${RUN_URL} ..."
         curl -fL --retry 3 -o "$CUSTOM_RUN" "$RUN_URL" \
             || { echo "ERROR: failed to download --run-url: $RUN_URL" >&2; exit 1; }
+        # Best-effort: NVIDIA's servers publish a .sha256sum sidecar; arbitrary
+        # hosts may not, and the flag stays usable there (with a warning).
+        # The hex guard keeps a soft-404 HTML page from reading as a mismatch.
+        _sha_url="${RUN_URL%%\?*}.sha256sum"
+        case "$RUN_URL" in *\?*) _sha_url="${_sha_url}?${RUN_URL#*\?}" ;; esac
+        _expected=$(curl -fsSL --retry 3 --max-time 30 "$_sha_url" \
+            | awk '{print $1; exit}' | tr '[:upper:]' '[:lower:]') || _expected=""
+        if [[ "$_expected" =~ ^[0-9a-f]{64}$ ]]; then
+            _actual=$(sha256sum "$CUSTOM_RUN" | awk '{print $1}')
+            [ "$_expected" = "$_actual" ] || {
+                echo "ERROR: SHA256 mismatch for --run-url download: expected ${_expected}, got ${_actual}" >&2
+                exit 1
+            }
+            echo "SHA256 verified against ${_sha_url}"
+            # Recorded next to the file so the build cache chain (rebuilds of
+            # this version via build-on-host) re-verifies instead of trusting.
+            printf '%s  %s\n' "$_expected" "$_run_base" > "${CUSTOM_RUN}.sha256"
+        else
+            echo "WARNING: no usable checksum sidecar at ${_sha_url}; proceeding unverified" >&2
+        fi
     fi
 fi
 
@@ -1020,6 +1079,29 @@ EOF
         exit 1
     fi
 fi
+# A stale backup (made before a TrueNAS update that changed the kernel) is as
+# useless for getting back to stock as a missing one, and every restore path
+# refuses it, so it gets the same refusal and the same override.
+BACKUP_PROBLEM=$(stock_backup_problem "${PERSIST_DIR}/nvidia-original.raw")
+if [ "${BACKUP_PROBLEM%%:*}" = "stale" ]; then
+    if $SKIP_BACKUP_CHECK; then
+        echo "WARN: ${PERSIST_DIR}/nvidia-original.raw is stale (kernel modules for: ${BACKUP_PROBLEM#stale:}; running: $(uname -r))." >&2
+        echo "      Continuing because of --skip-backup-check; it cannot restore stock on this kernel until you refresh it with recover-stock-nvidia.sh." >&2
+    else
+        cat >&2 <<EOF
+ERROR: ${PERSIST_DIR}/nvidia-original.raw is stale.
+       It has kernel modules for: ${BACKUP_PROBLEM#stale:}
+       This system runs kernel:   $(uname -r)
+       It holds the stock driver of the TrueNAS version it was made on, so
+       it cannot restore stock on this one. Refusing to swap nvidia.raw
+       without a usable stock backup. Refresh it first (downloads about
+       2 GB and overwrites the stale backup):
+         curl -fsSL ${RAW_BASE}/scripts/recover-stock-nvidia.sh | sudo bash
+       Or pass --skip-backup-check if you accept the risk.
+EOF
+        exit 1
+    fi
+fi
 
 # ─────────────────────────────────────────────────────────────────────────
 # Acquire nvidia.raw: --driver-sysext > cached reuse > build on host.
@@ -1071,33 +1153,56 @@ DOCKER_NVIDIA_PRIOR=""       # docker.config.nvidia value captured before we tou
 SWAP_STARTED=0               # 1 once the sysext unmerge / driver swap has begun
 STOPPED_APPS=""              # newline list of apps we successfully app.stop'd
 STOPPING_APP=""              # app currently mid app.stop (set before, cleared after)
+RESTART_FAILED_APPS=""       # newline list of apps whose app.start failed (stay stopped)
+DOCKER_NVIDIA_RESTORE_FAILED=0   # 1 if putting docker.config.nvidia back failed
 
 # Restore the docker nvidia toggle to its captured prior value. No-op if we
 # never disabled it. Default to true if we somehow never read the prior value.
 restore_docker_nvidia() {
     [ "$DOCKER_NVIDIA_DISABLED" = "1" ] || return 0
     local want="${DOCKER_NVIDIA_PRIOR:-true}"
-    midclt call docker.update "{\"nvidia\": ${want}}" >/dev/null 2>&1 \
-        && echo "  Restored docker.config.nvidia=${want}" >&2 \
-        || echo "  WARN: could not restore docker.config.nvidia (set it manually)" >&2
+    if midclt call -j docker.update "{\"nvidia\": ${want}}" >/dev/null 2>&1; then
+        echo "  Restored docker.config.nvidia=${want}" >&2
+    else
+        echo "  WARN: could not restore docker.config.nvidia (set it manually)" >&2
+        DOCKER_NVIDIA_RESTORE_FAILED=1
+    fi
     DOCKER_NVIDIA_DISABLED=0
 }
 
 # Restart every app we stopped (STOPPED_APPS) plus any app caught mid-stop
 # (STOPPING_APP). Must run AFTER restore_docker_nvidia — TrueNAS won't start a
-# container while the nvidia toggle is off.
+# container while the nvidia toggle is off. Apps that fail to start are kept
+# in RESTART_FAILED_APPS: TrueNAS does not start a stopped app at boot, so the
+# final message lists them for the user to start after the reboot.
 restart_stopped_apps() {
     local app
     while IFS= read -r app; do
         [ -n "$app" ] || continue
-        midclt call -j app.start "$app" >/dev/null 2>&1 \
-            && echo "  Restarted $app" >&2 \
-            || echo "  WARN: could not restart $app — start it from the Apps UI" >&2
+        if midclt call -j app.start "$app" >/dev/null 2>&1; then
+            echo "  Restarted $app" >&2
+        else
+            echo "  WARN: could not restart $app; start it from the Apps UI" >&2
+            RESTART_FAILED_APPS+="$app"$'\n'
+        fi
     done <<< "$(printf '%s\n%s\n' "$STOPPED_APPS" "$STOPPING_APP")"
 }
 
 cleanup_tmp() {
-    local rc=$?
+    # Signal traps pass an explicit code (130/143): $? would be the status of
+    # whatever command the signal interrupted, often 0, which would skip the
+    # rollback below and exit 0.
+    local rc=${1:-$?}
+    # Disarm before doing anything: a trapped INT/TERM runs this handler and
+    # then the EXIT trap runs it a second time, re-firing the non-idempotent
+    # app restart below (app.start on already-running apps -> bogus "could not
+    # restart" warnings + a doubled rollback banner). Disarming makes it run
+    # exactly once; the exit "$rc" at the end also stops the script resuming
+    # into the driver swap after a Ctrl-C, so an abort actually aborts.
+    # INT/TERM are ignored (not reset to default) so a second Ctrl-C cannot
+    # kill the rollback halfway and leave apps stopped.
+    trap '' INT TERM
+    trap - EXIT
     # Always put /usr back read-only if we left it writable.
     if [ "$USR_WAS_WRITABLE" = "1" ] && [ -n "$USR_DATASET" ]; then
         zfs set readonly=on "$USR_DATASET" 2>/dev/null || true
@@ -1118,6 +1223,7 @@ cleanup_tmp() {
                 echo "Install aborted before the driver swap — rolling back the GPU release..." >&2
                 restore_docker_nvidia
                 restart_stopped_apps
+                STOPPED_APPS=""; STOPPING_APP=""   # clear after acting (matches the flag-reset idiom)
             fi
         else
             # Post-swap: the live driver may be half-swapped. Do NOT restart
@@ -1136,8 +1242,11 @@ cleanup_tmp() {
             fi
         fi
     fi
+    exit "$rc"
 }
-trap cleanup_tmp EXIT INT TERM
+trap cleanup_tmp EXIT
+trap 'cleanup_tmp 130' INT
+trap 'cleanup_tmp 143' TERM
 
 # ─────────────────────────────────────────────────────────────────────────
 # Sanity-check the driver sysext contents.
@@ -1265,7 +1374,7 @@ except Exception:
     echo "  Disabling nvidia toolkit for docker (belt-and-suspenders)..."
     DOCKER_NVIDIA_PRIOR=$(midclt call docker.config 2>/dev/null \
         | python3 -c "import sys,json; print('true' if json.load(sys.stdin).get('nvidia') else 'false')" 2>/dev/null || echo true)
-    midclt call docker.update '{"nvidia": false}' >/dev/null \
+    midclt call -j docker.update '{"nvidia": false}' >/dev/null \
         && DOCKER_NVIDIA_DISABLED=1 \
         || echo "  WARN: docker.update returned an error — middleware may be flapping"
     printf "  Waiting for GPU compute clients to release... 0s/30s"
@@ -1281,7 +1390,9 @@ except Exception:
         N=$(/usr/bin/nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | grep -c '[0-9]' || true)
         N=${N:-0}
         if [ "${N:-0}" -eq 0 ]; then printf "\r  GPU compute clients released                              \n"; break; fi
-        printf "\r  Waiting for %d GPU process(es)... %ds/30s" "$N" "$((attempt * 3))"; sleep 3
+        # Fixed-width field clears the longer "0s/30s" placeholder line above;
+        # a bare \r redraw would leave its tail ("...se... 0s/30s") on screen.
+        printf "\r  %-52s" "Waiting for $N GPU process(es)... $((attempt * 3))s/30s"; sleep 3
     done
     if [ "${N:-0}" -gt 0 ]; then
         echo ""
@@ -1291,7 +1402,7 @@ else
     echo "  nvidia-smi missing; toggling docker.nvidia=false only (no drain check)"
     DOCKER_NVIDIA_PRIOR=$(midclt call docker.config 2>/dev/null \
         | python3 -c "import sys,json; print('true' if json.load(sys.stdin).get('nvidia') else 'false')" 2>/dev/null || echo true)
-    midclt call docker.update '{"nvidia": false}' >/dev/null \
+    midclt call -j docker.update '{"nvidia": false}' >/dev/null \
         && DOCKER_NVIDIA_DISABLED=1 \
         || echo "  WARN: docker.update returned an error"
 fi
@@ -1330,7 +1441,12 @@ if_real mkdir -p /etc/extensions
 if_real ln -sf "$LIVE_NVIDIA" /etc/extensions/nvidia.raw
 
 echo "Re-merging sysext..."
-if_real systemd-sysext merge
+# refresh, not merge: docker.update runs TrueNAS's nvidia handler, which does
+# its own `systemd-sysext refresh`. -j above waits for that job, and refresh
+# stays correct even if something else merged /usr in the meantime (a plain
+# merge then fails with "Hierarchy '/usr' is already merged" and aborts the
+# install after the driver swap).
+if_real systemd-sysext refresh
 if_real systemctl daemon-reload
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -1397,27 +1513,51 @@ if $OK; then
     # nvidia toggle (to its prior value) and restart the apps we stopped. Order
     # matters — the toggle must be back on before app.start, or TrueNAS no-ops
     # the start. There's no post-reboot configure-mig here to do this, so the
-    # installer owns it. The apps come up healthy after the reboot below; until
-    # then they'll show the same driver/library mismatch nvidia-smi does.
+    # installer owns it. When a working driver was replaced, the new userspace
+    # meets the old loaded kernel module until the reboot, so these restarts
+    # (and docker itself) can fail; the message below says what to expect.
     if [ "$DOCKER_NVIDIA_DISABLED" = "1" ] || [ -n "$STOPPED_APPS" ]; then
         echo "Restoring GPU access (docker nvidia toggle + stopped apps)..."
         restore_docker_nvidia
         restart_stopped_apps
         echo ""
     fi
+    INSTALLED_VER="${NEW_DRIVER_VER:-${TARGET_NV_VER:-unknown}}"
+    # The module the running kernel has loaded. The swap only replaces files;
+    # the old module stays loaded (in use) until the reboot.
+    LOADED_KMOD_VER=$(cat /sys/module/nvidia/version 2>/dev/null || true)
+    echo "=== Driver install complete: REBOOT REQUIRED ==="
+    echo ""
+    if [ -n "$LOADED_KMOD_VER" ] && [ "$LOADED_KMOD_VER" != "$INSTALLED_VER" ]; then
+        cat <<EOF
+Installed driver ${INSTALLED_VER}, but the loaded kernel module is still the
+previous driver's (${LOADED_KMOD_VER}). The new module loads at the next boot.
+Until you reboot, the new userspace does not work with the old module:
+
+  - nvidia-smi fails with "Driver/library version mismatch".
+  - GPU apps cannot use the GPU, and the whole TrueNAS Apps service can fail
+    to start, not just GPU apps: the Apps page shows "Failed to start docker
+    for Applications" and 'systemctl status docker' shows start-limit-hit.
+
+All of this clears after the reboot.
+EOF
+    else
+        echo "Installed driver ${INSTALLED_VER}. Its kernel module loads at the next boot."
+    fi
+    if [ -n "$RESTART_FAILED_APPS" ]; then
+        echo ""
+        echo "These GPU apps were stopped for the swap and could not be restarted."
+        echo "They stay stopped after the reboot; start each one from the Apps UI, or:"
+        printf '%s' "$RESTART_FAILED_APPS" | sed '/^$/d;s/^/  sudo midclt call -j app.start /'
+    fi
+    if [ "$DOCKER_NVIDIA_RESTORE_FAILED" = "1" ]; then
+        echo ""
+        echo "The docker NVIDIA setting could not be set back. After the reboot, run:"
+        echo "  sudo midclt call -j docker.update '{\"nvidia\": ${DOCKER_NVIDIA_PRIOR:-true}}'"
+    fi
     cat <<EOF
-=== Driver install complete — REBOOT REQUIRED ===
 
-The kernel modules currently loaded are the PREVIOUS driver's; userspace
-libraries are now the new driver's (${NEW_DRIVER_VER:-$TARGET_NV_VER}). Until you reboot:
-
-  nvidia-smi will report "Driver/library version mismatch"
-  any GPU apps just restarted will mismatch too — reboot promptly
-
-After reboot:
-  - new kernel modules load from /usr/lib/modules/<kernel>/
-  - userspace libs match; restarted GPU apps recover
-  - the PREINIT restores this driver after any future TrueNAS update
+The PREINIT restores this driver after any future TrueNAS update.
 
 Run: sudo reboot
 

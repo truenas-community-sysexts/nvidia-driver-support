@@ -58,7 +58,7 @@ jobs:
       matrix: ${{ steps.set.outputs.matrix }}
       truenas: ${{ steps.set.outputs.truenas }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Build the version matrix
         id: set
         env:
@@ -92,7 +92,7 @@ jobs:
               # open trains (newest release per major in open_latest, e.g.
               # 610/595/590) and the 580 branch as both open (Turing+) and
               # proprietary (Maxwell/Pascal/Volta). 470 (Kepler) is
-              # proprietary-only, built from the vendored patch set. Older
+              # proprietary-only, built with the 470xx patch set. Older
               # trains stay user-installable via --driver=X.Y.Z; they just
               # aren't smoke-built here.
               open_trains = {}
@@ -130,11 +130,11 @@ jobs:
     # required build.
     continue-on-error: ${{ matrix.experimental || false }}
     steps:
-      - uses: actions/checkout@v6
-        with:
-          # legacy-470 builds from the nvidia-470xx-linux-mainline patch
-          # submodule under third_party/.
-          submodules: recursive
+      # No submodules, on purpose: legacy-470 then downloads its
+      # nvidia-470xx-linux-mainline patch set at the pinned commit, exactly as
+      # an install one-liner does on a user's host (it stages only scripts).
+      # lint.yml checks that pin matches the third_party/ submodule.
+      - uses: actions/checkout@v7
 
       - name: Install build dependencies
         run: |

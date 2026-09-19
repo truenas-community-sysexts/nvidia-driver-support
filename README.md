@@ -1,19 +1,19 @@
 # TrueNAS Community NVIDIA Driver Support
 
-Install **any** NVIDIA driver on TrueNAS SCALE by swapping the stock driver sysext for one built on your own host — a legacy branch for a card TrueNAS no longer supports, a specific recent open driver, or a patched/custom `.run` you supply.
+Install **any** NVIDIA driver on TrueNAS by swapping the stock driver sysext for one built on your own host — a legacy branch for a card TrueNAS no longer supports, a specific recent open driver, or a patched/custom `.run` you supply.
 
 ```bash
 # On TrueNAS, as root — detects your card and recommends a driver:
 curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-driver-support/main/scripts/install-nvidia-driver.sh \
   | sudo bash
-sudo reboot
 ```
+Then reboot if install was ok.
 
 > **Driver-only.** This repo owns the **driver swap**. If you want **MIG** on a Blackwell card, install [`nvidia-mig-support`](https://github.com/truenas-community-sysexts/nvidia-mig-support) after the reboot. The MIG sysext layers on top of whatever driver is present.  see [MIG coexistence](#coexistence-with-nvidia-mig-support).)
 
 ## Why this exists
 
-TrueNAS SCALE ships exactly one NVIDIA driver, and recent releases moved to a 570.x+ branch that **only supports Turing and newer GPUs with open kernel modules**. That drops a lot of hardware people still run in NAS boxes for transcoding and light compute:
+TrueNAS ships exactly one NVIDIA driver, and recent releases moved to a 570.x+ branch that **only supports Turing and newer GPUs with open kernel modules**. That drops a lot of hardware people still run in NAS boxes for transcoding and light compute:
 
 - **Kepler** (GTX 600/700, Quadro K-series) — last driver is the **470** branch
 - **Maxwell / Pascal / Volta** (GTX 900/10-series, Quadro P400/P2000, Titan V) — last driver is the **580** branch
@@ -30,7 +30,7 @@ The picker reads [`catalog/driver-catalog.json`](catalog/driver-catalog.json) (r
 | Maxwell · Pascal · Volta — GTX 900/10-series, Quadro P-series, Titan V | `GM`/`GP`/`GV` | `legacy-580` | proprietary |
 | Kepler — GTX 600/700, Quadro K-series, Tesla K-series | `GK` | `legacy-470` | proprietary |
 
-All three tiers **build against TrueNAS's current 6.x kernel and are smoke-tested in CI** on every change. Kepler/`legacy-470` is EOL upstream and only compiles on 6.x thanks to a vendored community patch set ([`nvidia-470xx-linux-mainline`](https://github.com/joanbm/nvidia-470xx-linux-mainline)) this repo applies for you.
+All three tiers **build against TrueNAS's current 6.x kernel and are smoke-tested in CI** on every change. Kepler/`legacy-470` is EOL upstream and only compiles on 6.x thanks to a community patch set ([`nvidia-470xx-linux-mainline`](https://github.com/joanbm/nvidia-470xx-linux-mainline)) that the build downloads on your host, at a pinned commit, and applies for you.
 
 > **Older than Kepler?** **Fermi** (GTX 400/500, `GF` → 390.x) and **Tesla gen 1–2** (8/9/200-series, `G8x`/`G9x`/`GT2xx` → 340.x) are **not supported out of the box** — those EOL installers don't compile against the 6.x kernel and this repo ships **no** patches for them. You can still attempt one by supplying your own community-patched installer via `--custom-run` or `--run-url` (see [docs/legacy-cards.md](docs/legacy-cards.md)); expect to do the legwork.
 
@@ -75,7 +75,7 @@ The catalog deliberately lists only NVIDIA's blessed production drivers (≤ `la
 2. **Builds `nvidia.raw` on this host** inside a transient `ubuntu:24.04` docker container — downloads the matching TrueNAS `.update` (for kernel headers) and the NVIDIA `.run`, cross-compiles `nvidia.ko` against your running kernel, and squashfs's the result. ≈ 8 min first run; cached after (~10 s re-install).
 3. **Swaps** the stock `nvidia.raw` for the built one (brief `/usr` read-write via a ZFS `readonly` toggle), keeping `nvidia-original.raw` as a backup.
 4. **Registers a PREINIT** that restores your driver after a TrueNAS update wipes `/usr`, and flags a kernel bump.
-5. **Reboot required** — live-swapping the driver leaves stale kernel modules in memory; `nvidia-smi` reports a driver/library mismatch until you reboot.
+5. **Reboot required**: live-swapping the driver leaves the old kernel module loaded, so until you reboot `nvidia-smi` reports a driver/library mismatch and the whole Apps service can fail to start. GPU apps the installer stopped but could not restart stay stopped after the reboot; its final message lists them.
 
 Nothing pre-built is downloaded: NVIDIA's EULA prohibits redistributing the proprietary userspace, so `nvidia.raw` is **only ever assembled on your machine**, where you accept NVIDIA's license when the `.run` runs with `--silent`.
 
@@ -93,9 +93,9 @@ curl -fsSL .../scripts/install-nvidia-driver.sh | sudo bash -s -- --release=v5
 
 ## Prerequisites
 
-- TrueNAS SCALE 25.10 or later
+- TrueNAS 25.10 or later
 - A working Docker daemon (TrueNAS Apps users already have it; on a headless box with Apps disabled the build starts Docker and restores its prior state on exit)
-- A stock-driver backup before the first swap — the install refuses without one. Create it once:
+- A stock-driver backup for the running TrueNAS version. The install refuses without one, and refuses a stale one made by an older TrueNAS with another kernel. Create it before the first install, and refresh it after a TrueNAS update that changes the kernel:
   ```bash
   curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-driver-support/main/scripts/recover-stock-nvidia.sh | sudo bash
   ```
@@ -123,6 +123,12 @@ The PREINIT restores your custom driver automatically when an update wipes `/usr
 curl -fsSL .../scripts/install-nvidia-driver.sh | sudo bash -s -- --rebuild
 ```
 
+A kernel bump also leaves the stock backup (`nvidia-original.raw`) stale: it holds the stock driver for the old kernel. The installer and the uninstaller refuse a stale backup (`--check` warns about it), so refresh it before that rebuild. Run without flags, it fetches the stock driver of the running TrueNAS version and overwrites the old backup (downloads about 2 GB):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-driver-support/main/scripts/recover-stock-nvidia.sh | sudo bash
+```
+
 ## Scripts reference
 
 | Script | What it does |
@@ -130,7 +136,7 @@ curl -fsSL .../scripts/install-nvidia-driver.sh | sudo bash -s -- --rebuild
 | [`install-nvidia-driver.sh`](scripts/install-nvidia-driver.sh) | Picks a driver (card-detect / `--branch` / `--driver` / `--custom-run` / `--run-url`), builds `nvidia.raw` on-host, swaps the stock driver, registers the restore PREINIT. `--list`, `--check`, `--dry-run`. |
 | [`build-nvidia-sysext.sh`](scripts/build-nvidia-sysext.sh) | The driver build itself. Branch-aware installer flags (drops `--kernel-module-type` etc. for pre-515 legacy installers). Runs in CI as a smoke test and inside the on-host container. |
 | [`build-on-host.sh`](scripts/build-on-host.sh) | Wraps the build in `docker run --rm ubuntu:24.04`; caches the TrueNAS `.update` + NVIDIA `.run`. |
-| [`recover-stock-nvidia.sh`](scripts/recover-stock-nvidia.sh) | Extracts stock `nvidia.raw` from the official TrueNAS `.update` → `nvidia-original.raw` (backup before first swap). |
+| [`recover-stock-nvidia.sh`](scripts/recover-stock-nvidia.sh) | Extracts stock `nvidia.raw` from the official TrueNAS `.update` → `nvidia-original.raw` (backup before first swap; re-run after a kernel-changing TrueNAS update). |
 | [`uninstall-nvidia-driver.sh`](scripts/uninstall-nvidia-driver.sh) | Reverts to stock, deregisters the PREINIT, cleans build artifacts (keeps `nvidia-original.raw`). |
 | [`nvidia-preinit-driver.sh`](scripts/nvidia-preinit-driver.sh) | Boot-time PREINIT: restores the custom driver after a TrueNAS update + kernel-mismatch detection. |
 

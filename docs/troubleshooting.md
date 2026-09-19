@@ -9,6 +9,13 @@ Expected — **you haven't rebooted yet**. The swap replaced the userspace libs 
 kernel module is still loaded. `sudo reboot`, then `nvidia-smi` should report the new
 version.
 
+Until that reboot the whole Apps service can fail to start as well, not just GPU apps: the
+Apps page shows "Failed to start docker for Applications" and `systemctl status docker` shows
+`start-limit-hit`. That also clears after the reboot. GPU apps the installer stopped but could
+not restart (`WARN: could not restart <app>`) stay stopped after the reboot; the install's
+final message lists them. Start each one from the Apps UI or with
+`sudo midclt call -j app.start <app>`.
+
 ## `nvidia-smi: NVIDIA-SMI couldn't find any device` after a TrueNAS update
 
 The update bumped the kernel and the bundled `nvidia.ko` no longer matches. Check:
@@ -18,7 +25,9 @@ sudo journalctl -b -t nvidia-preinit-driver
 ```
 
 Look for `ERROR: kernel-version mismatch — running <A> but sysext bundles modules for <B>`.
-Rebuild against the new kernel:
+The same update leaves the stock backup stale, so refresh it first (see
+[`nvidia-original.raw is stale`](#nvidia-originalraw-is-stale)); the installer refuses a stale
+one. Then rebuild against the new kernel:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-driver-support/main/scripts/install-nvidia-driver.sh \
@@ -42,6 +51,20 @@ See [legacy-cards.md](legacy-cards.md#making-a-best-effort-card-work-patched-run
 visible and check whether NVIDIA changed the `.run` (the CI smoke build catches most of
 these first).
 
+## `Failed to download the 470 patch set`
+
+A `legacy-470` (Kepler) build patches the driver with the community
+[`nvidia-470xx-linux-mainline`](https://github.com/joanbm/nvidia-470xx-linux-mainline) set,
+which it downloads from GitHub at the commit pinned as `PATCH_470XX_COMMIT` in
+`build-nvidia-sysext.sh`. If the host can't reach GitHub (or you want to try a newer patch
+set), place a copy of that repository next to the staged scripts and re-run the install; the
+build then uses it instead of downloading:
+
+```
+/mnt/<pool>/.config/nvidia-gpu/third_party/nvidia-470xx-linux-mainline/extract_and_patch
+/mnt/<pool>/.config/nvidia-gpu/third_party/nvidia-470xx-linux-mainline/patches/...
+```
+
 ## `open kernel modules don't exist before driver 515` / `predates Turing`
 
 You asked for `--kmod=open` on a card or driver that has no open-module path
@@ -59,6 +82,30 @@ curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-dr
 This extracts the stock `nvidia.raw` from the official TrueNAS `.update` into
 `/mnt/<pool>/.config/nvidia-gpu/nvidia-original.raw`. Or `--skip-backup-check` to proceed
 without one (you won't be able to revert to stock cleanly).
+
+## `nvidia-original.raw is stale`
+
+The stock backup holds the stock driver of the TrueNAS version it was made on. After a TrueNAS
+update that changed the kernel, its kernel modules are for the old kernel, so restoring it
+would put a driver on the system that cannot load. The installer and the uninstaller refuse a
+stale backup, `recover-stock-nvidia.sh` never writes one, and `--check` warns about it.
+
+Refresh it. Run without flags, `recover-stock-nvidia.sh` fetches the stock driver of the
+running TrueNAS version (from `/etc/version`) and overwrites the stale backup (downloads about
+2 GB):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-driver-support/main/scripts/recover-stock-nvidia.sh | sudo bash
+```
+
+To check a backup by hand (`0` means it has no modules for the running kernel):
+
+```bash
+unsquashfs -l /mnt/*/.config/nvidia-gpu/nvidia-original.raw 'usr/lib/modules/*' | grep -c "/$(uname -r)/"
+```
+
+`--skip-backup-check` overrides the refusal. The uninstaller then leaves the live driver in
+place instead of restoring the stale backup, as it does when there is no backup.
 
 ## `docker not found` during the build
 
