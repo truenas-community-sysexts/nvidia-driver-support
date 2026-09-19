@@ -157,6 +157,21 @@ def main():
         print("WARN: latest.txt unavailable — leaving open_latest unchanged", file=sys.stderr)
         new_open_latest = cat.get("open_latest", [])
     else:
+        # latest.txt sits behind an Akamai cache whose edges can serve stale
+        # copies for weeks, so successive runs saw it bounce between old and
+        # new production versions (595.58.03 / 595.84 / 595.91.07 / 595.99.02),
+        # and every bounce committed the catalog and cut a release. NVIDIA's
+        # production pointer only moves forward, so never let it fall below
+        # the ceiling already committed (open_latest[0] is always the previous
+        # latest.txt value).
+        prev_open = cat.get("open_latest") or []
+        if prev_open and vkey(prev_open[0]) > vkey(latest_txt):
+            print(
+                f"WARN: latest.txt says {latest_txt}, older than the committed "
+                f"{prev_open[0]} (stale CDN edge); keeping {prev_open[0]}",
+                file=sys.stderr,
+            )
+            latest_txt = prev_open[0]
         ceiling = vkey(latest_txt)
         # Trust latest.txt for its own train even if a HEAD check flakes.
         open_trains = {ceiling[0]: latest_txt}

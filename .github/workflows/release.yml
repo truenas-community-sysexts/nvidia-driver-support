@@ -53,7 +53,7 @@ jobs:
     needs: smoke
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Write release notes
         env:
@@ -168,6 +168,12 @@ jobs:
             if (existing.data.some(i => i.title.includes(tag))) {
               console.log(`Open hardware-test issue already exists for ${tag}, skipping`); return;
             }
+            // Test instructions. Every command must work exactly as written on
+            // a TrueNAS box: a human validator pastes them. The one-liner runs
+            // main's install-nvidia-driver.sh (what users run); --release pins
+            // the helpers + catalog to this release's assets.
+            const inst = `https://raw.githubusercontent.com/${owner}/${repo}/main/scripts/install-nvidia-driver.sh`;
+            const base = `https://github.com/${owner}/${repo}/releases/download/${tag}`;
             await github.rest.issues.create({ owner, repo, title, labels: ['hardware-test'],
               body: [
                 `The full driver build matrix compiled green in CI for this commit. Before promoting to **Latest**, verify at least one driver variant **on real hardware** (CI can't drive a GPU).`,
@@ -176,19 +182,54 @@ jobs:
                 `<!-- release-tag: ${tag} -->`,
                 ...(change ? [``, `### What changed`, change] : []),
                 ``,
-                `### Install THIS build to test it`,
-                `It is a **pre-release**, so the default install uses the current Latest tooling/catalog, not this build. Pin this build with \`--release\`:`,
+                `### Requirements`,
+                `- Any supported TrueNAS (25.10 or later, including 26 betas) with an NVIDIA GPU. The driver is built on this host against its running kernel, so there is no kernel pin.`,
+                `- Internet access and about 8 minutes: the driver is built in a docker container on this box (if Apps is disabled the build starts docker itself).`,
+                `- A stock-driver backup on the data pool; the installer (and its dry run) refuses without one. Step 1 creates it if missing.`,
+                `- The install stops GPU apps for the swap and restarts them; GPU apps and \`nvidia-smi\` only work again after the reboot in step 4.`,
+                ``,
+                `### 1. Pre-checks`,
                 "```bash",
-                `curl -fsSL https://raw.githubusercontent.com/${owner}/${repo}/main/scripts/install-nvidia-driver.sh | sudo bash -s -- --release=${tag}`,
+                `lspci -nn -d 10de:                     # lists the NVIDIA GPU`,
+                `nvidia-smi --query-gpu=name,driver_version --format=csv,noheader   # card + current driver (errors if the running driver lacks support for the card)`,
+                `ls -l /mnt/*/.config/nvidia-gpu/nvidia-original.raw               # stock backup must exist`,
+                "```",
+                `Only if that \`ls\` fails, create the backup (downloads about 1.8 GB):`,
+                "```bash",
+                `curl -fsSL ${base}/recover-stock-nvidia.sh | sudo bash`,
                 "```",
                 ``,
-                `### Test checklist (at least one variant)`,
-                `- [ ] Install with the \`--release=${tag}\` command above, on a box with an NVIDIA GPU`,
-                `- [ ] The picker recommends a sensible driver for the detected card`,
-                `- [ ] The driver builds on-host and \`nvidia-smi\` works after reboot`,
-                `- [ ] Note which driver/branch + card you tested in a comment below`,
+                `### 2. Install this build`,
+                `It is a pre-release, so the default install uses the current Latest tooling and catalog. Pin this build with \`--release\`:`,
+                "```bash",
+                `I=${inst}`,
+                `curl -fsSL "$I" | sudo bash -s -- --release=${tag} --dry-run   # "Release: ${tag} (sourcing install tooling + catalog from its assets)", ends "Dry-run complete"`,
+                `curl -fsSL "$I" | sudo bash -s -- --release=${tag}             # pick the recommended driver; prints "REBOOT REQUIRED" when done`,
+                "```",
+                `Add \`--pool=NAME\` if it asks for a pool. To test a specific variant add \`--branch=latest\`, \`--branch=legacy-580\`, \`--branch=legacy-470\` or \`--driver=X.Y.Z\`.`,
                 ``,
-                `### Promote`,
-                `This build is published as a **pre-release**, so it is not served by \`releases/latest\` (or the install script's \`--release=latest\`) yet. Once verified, **close this issue as completed** — that automatically promotes [\`${tag}\`](${releaseUrl}) to the latest release and appends the changelog.`,
+                `### 3. Verify`,
+                "```bash",
+                `curl -fsSL "$I" | sudo bash -s -- --check   # 0 fail; an nvidia-smi warning is expected until the reboot`,
+                "```",
+                ``,
+                `### 4. Reboot and re-verify`,
+                "```bash",
+                `sudo reboot`,
+                "```",
+                `After it is back up:`,
+                "```bash",
+                `I=${inst}`,
+                `curl -fsSL "$I" | sudo bash -s -- --check   # 0 fail, "Driver versions match: sysext=X, runtime=X"`,
+                `nvidia-smi                                  # GPU listed, driver version = the one you picked`,
+                `sudo journalctl -b -t nvidia-preinit-driver --no-pager -o cat | grep -E '^(ERROR|WARN|Done)'   # just "Done"`,
+                `sudo docker ps --format '{{.Names}}\\t{{.Status}}'                  # GPU apps Up, not Restarting`,
+                `sudo nvidia-smi mig -lgi                    # MIG boxes only: GPU instances recreated`,
+                "```",
+                ``,
+                `### 5. Report and sign off`,
+                `Comment with \`cat /etc/version\`, the card, the driver/branch you picked, and the step 4 output of \`--check\` and \`nvidia-smi\`.`,
+                `- Works: close this issue as **completed**. That promotes [\`${tag}\`](${releaseUrl}) to Latest (the default one-liner then uses its tooling + catalog) and appends the changelog.`,
+                `- Broken: comment what failed, then close as **not planned**. The release stays an unpromoted pre-release. To go back to the stock driver: \`sudo uninstall-nvidia-driver && sudo reboot\`.`,
               ].join('\n') });
             console.log(`Created hardware-test issue for ${tag}`);

@@ -859,6 +859,26 @@ if [ -n "$RUN_URL" ]; then
         echo "Downloading custom .run from ${RUN_URL} ..."
         curl -fL --retry 3 -o "$CUSTOM_RUN" "$RUN_URL" \
             || { echo "ERROR: failed to download --run-url: $RUN_URL" >&2; exit 1; }
+        # Best-effort: NVIDIA's servers publish a .sha256sum sidecar; arbitrary
+        # hosts may not, and the flag stays usable there (with a warning).
+        # The hex guard keeps a soft-404 HTML page from reading as a mismatch.
+        _sha_url="${RUN_URL%%\?*}.sha256sum"
+        case "$RUN_URL" in *\?*) _sha_url="${_sha_url}?${RUN_URL#*\?}" ;; esac
+        _expected=$(curl -fsSL --retry 3 --max-time 30 "$_sha_url" \
+            | awk '{print $1; exit}' | tr '[:upper:]' '[:lower:]') || _expected=""
+        if [[ "$_expected" =~ ^[0-9a-f]{64}$ ]]; then
+            _actual=$(sha256sum "$CUSTOM_RUN" | awk '{print $1}')
+            [ "$_expected" = "$_actual" ] || {
+                echo "ERROR: SHA256 mismatch for --run-url download: expected ${_expected}, got ${_actual}" >&2
+                exit 1
+            }
+            echo "SHA256 verified against ${_sha_url}"
+            # Recorded next to the file so the build cache chain (rebuilds of
+            # this version via build-on-host) re-verifies instead of trusting.
+            printf '%s  %s\n' "$_expected" "$_run_base" > "${CUSTOM_RUN}.sha256"
+        else
+            echo "WARNING: no usable checksum sidecar at ${_sha_url}; proceeding unverified" >&2
+        fi
     fi
 fi
 
