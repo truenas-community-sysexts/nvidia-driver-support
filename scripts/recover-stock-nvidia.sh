@@ -63,6 +63,63 @@ restore_state() {
 }
 trap restore_state EXIT INT TERM
 
+# ─────────────────────────────────────────────────────────────────────────
+# Stock-backup freshness. Duplicated verbatim in install-nvidia-driver.sh,
+# uninstall-nvidia-driver.sh and recover-stock-nvidia.sh (each stays a
+# self-contained curl|bash artifact); keep the copies in sync.
+#
+# nvidia-original.raw holds the stock driver of the TrueNAS version it was
+# made on. After a TrueNAS update that changed the kernel, its modules are for
+# the old kernel, and restoring it would put a driver on the system that
+# cannot load. It is usable only if it ships modules for the running kernel.
+# ─────────────────────────────────────────────────────────────────────────
+
+# Kernel versions a sysext image ships modules for (usr/lib/modules/<kver>/),
+# space-separated. Empty when it ships none or cannot be read.
+raw_module_kernels() {
+    unsquashfs -l "$1" 'usr/lib/modules/*' 2>/dev/null \
+        | sed -nE 's|^[^/]*/usr/lib/modules/([^/]+)/.*|\1|p' \
+        | sort -u | paste -sd ' ' - || true
+}
+
+# Why a stock nvidia.raw can't be restored on this system; prints nothing
+# when it can. "missing", or "stale:<kernels it has modules for>".
+stock_backup_problem() {
+    local raw="$1" kvers
+    [ -f "$raw" ] || { echo "missing"; return 0; }
+    kvers=$(raw_module_kernels "$raw")
+    case " ${kvers} " in
+        *" $(uname -r) "*) ;;
+        *) echo "stale:${kvers:-none found}" ;;
+    esac
+}
+
+# Checksum from a sidecar URL: the 64-hex digest in its first field. Fails on
+# transport errors and on non-hash content (soft-404 pages), so an HTML error
+# body is never taken for a checksum. Same as build-nvidia-sysext.sh.
+fetch_expected_sha() {
+    local sha
+    sha="$(curl -fsSL --retry 3 --max-time 60 "$1" | awk '{print $1; exit}')" || return 1
+    [[ "$sha" =~ ^[0-9a-fA-F]{64}$ ]] || return 1
+    printf '%s\n' "$sha" | tr '[:upper:]' '[:lower:]'
+}
+
+# Resume a partial download only if it is the same file. A leftover from an
+# interrupted run for another TrueNAS version would otherwise be resumed:
+# curl appends this version's bytes to it, or, when the leftover is at least
+# as long, treats it as complete; either way the OLD version's stock driver
+# gets extracted. The source URL is recorded next to the download, and a
+# partial with a different URL (or none, from before this record existed) is
+# discarded.
+prepare_download_resume() {
+    local file="$1" url="$2"
+    if [ -e "$file" ] && [ "$(cat "${file}.url" 2>/dev/null)" != "$url" ]; then
+        echo "Discarding ${file}: it is not a download of ${url}"
+        rm -f "$file"
+    fi
+    printf '%s\n' "$url" > "${file}.url"
+}
+
 [ -n "$VERSION" ] || VERSION=$(cat /etc/version 2>/dev/null | tr -d '[:space:]')
 [ -n "$VERSION" ] || { echo "ERROR: cannot determine TrueNAS version, pass --version=X.Y.Z" >&2; exit 1; }
 
@@ -185,16 +242,41 @@ if [ -n "$UPDATE_FILE" ]; then
     echo "Using preloaded update file: $UPDATE_FILE"
 else
     UPDATE_FILE="${WORK}/truenas.update"
-    if [ -s "$UPDATE_FILE" ]; then
-        echo "Resuming/using existing download at ${UPDATE_FILE}"
-    fi
     if [ "$CODENAME" = "Goldeye" ]; then
         URL="https://download.truenas.com/TrueNAS-SCALE-${CODENAME}/${VERSION}/${URL_FILE}?download=1"
     else
         URL="https://update-public.sys.truenas.net/TrueNAS-26-BETA/${URL_FILE}"
     fi
+    # Checksum sidecar next to the .update (any ?download=1 query goes after
+    # the .sha256 suffix), fetched before the ~2 GB download so a problem
+    # fails fast. As in build-nvidia-sysext.sh, only a definitive 404 (no
+    # sidecar published) downgrades to a warning.
+    SHA_URL="${URL%%\?*}.sha256"
+    case "$URL" in *\?*) SHA_URL="${SHA_URL}?${URL#*\?}" ;; esac
+    SHA_STATUS="$(curl -sL -o /dev/null --retry 3 --max-time 30 -w '%{http_code}' "$SHA_URL" || true)"
+    EXPECTED_SHA=""
+    if [ "$SHA_STATUS" = "404" ]; then
+        echo "WARN: no .sha256 published at ${SHA_URL}; the download will not be verified" >&2
+    else
+        EXPECTED_SHA="$(fetch_expected_sha "$SHA_URL")" \
+            || { echo "ERROR: failed to fetch the .update checksum: ${SHA_URL} (HTTP ${SHA_STATUS})" >&2; exit 1; }
+    fi
+    prepare_download_resume "$UPDATE_FILE" "$URL"
+    if [ -s "$UPDATE_FILE" ]; then
+        echo "Resuming/using existing download at ${UPDATE_FILE}"
+    fi
     echo "Downloading ${URL}"
     curl -fL --retry 3 --continue-at - -o "$UPDATE_FILE" "$URL"
+    if [ -n "$EXPECTED_SHA" ]; then
+        ACTUAL_SHA="$(sha256sum "$UPDATE_FILE" | awk '{print $1}')"
+        if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+            rm -f "$UPDATE_FILE" "${UPDATE_FILE}.url"
+            echo "ERROR: ${UPDATE_FILE} failed SHA256 verification (expected ${EXPECTED_SHA}, got ${ACTUAL_SHA})." >&2
+            echo "       Discarded it; re-run to download it again." >&2
+            exit 1
+        fi
+        echo "SHA256 verified against ${SHA_URL}"
+    fi
 fi
 ls -lh "$UPDATE_FILE"
 
@@ -218,6 +300,26 @@ unsquashfs -f -d "$INNER_DIR" "$INNER" usr/share/truenas/sysext-extensions/nvidi
 
 STOCK="${INNER_DIR}/usr/share/truenas/sysext-extensions/nvidia.raw"
 [ -f "$STOCK" ] || { echo "ERROR: stock nvidia.raw not found inside rootfs.squashfs" >&2; exit 1; }
+
+# Never stage or install a stock driver for another kernel (--version or
+# --update-file for a different TrueNAS release): it cannot load here, and
+# staging it would replace a usable nvidia-original.raw with a stale one.
+STOCK_PROBLEM=$(stock_backup_problem "$STOCK")
+if [ -n "$STOCK_PROBLEM" ]; then
+    cat >&2 <<EOF
+ERROR: the stock nvidia.raw extracted from ${UPDATE_FILE} is not for this kernel.
+       It has kernel modules for: ${STOCK_PROBLEM#stale:}
+       This system runs kernel:   $(uname -r)
+       Leaving ${PERSIST}/nvidia-original.raw untouched and installing
+       nothing: that driver cannot load on this kernel. If you passed
+       --version or --update-file, run without them to fetch the stock
+       driver of the running TrueNAS version (read from /etc/version).
+EOF
+    # Same cleanup as a successful run: the download and the extraction are
+    # of no use for this kernel.
+    $KEEP_WORKDIR || rm -rf "$WORK"
+    exit 1
+fi
 
 echo ""
 echo "=== Stock nvidia.raw recovered ==="
