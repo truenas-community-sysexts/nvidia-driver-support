@@ -50,7 +50,9 @@
 #                         instead of main. Releases are tooling+catalog
 #                         snapshots — they do NOT pin a driver; pick the driver
 #                         with --branch/--driver as usual. With no --release the
-#                         repo's latest release is used (falling back to main).
+#                         newest release a hardware test approved for this box's
+#                         TrueNAS train is used, and the install stops if there
+#                         is none (get.sh, the one-liner, picks it the same way).
 #   --kmod=open|proprietary
 #                         kernel-module flavor. Auto-derived from the branch/version
 #                         if omitted (open for Turing+, proprietary for legacy). When
@@ -89,7 +91,7 @@ CUSTOM_RUN=""
 RUN_URL=""            # --run-url=URL; downloaded then treated like --custom-run
 KMOD_TYPE=""          # empty = auto-derive
 DRIVER_SRC=""
-RELEASE_TAG=""        # --release=TAG (v<N>); empty = auto-resolve repo's latest release
+RELEASE_TAG=""        # --release=TAG (v<N>); empty = newest release approved for this train
 RESOLVED_TAG=""       # set by resolve_release_for_install (release used for sourcing)
 RELEASE_DL_BASE=""    # release asset download base URL when a release is in use
 REBUILD=false
@@ -184,6 +186,12 @@ run_with_elapsed_capture() {
 # ─────────────────────────────────────────────────────────────────────────
 # Version / tag parsing helpers
 # ─────────────────────────────────────────────────────────────────────────
+# BEGIN approved-release (a verbatim copy lives in get.sh and in
+# scripts/install-nvidia-driver.sh, each a self-contained curl|bash script;
+# tests/test_release_selection.py fails CI when the copies differ)
+
+# TrueNAS version of this box, read from the middleware. Retried: midclt can
+# be briefly unavailable right after boot.
 detect_truenas_version() {
     local v i
     for i in 1 2 3; do
@@ -199,6 +207,166 @@ except Exception:
     return 1
 }
 
+# Train key of a TrueNAS version: the major version from 26 on (26.0.0-BETA.3
+# and 26.1.2 are both train 26), major.minor before that (25.10.7 is 25.10,
+# 25.04.2.6 is 25.04). Fails on anything else.
+truenas_train_key() {
+    local v="$1" major minor
+    major="${v%%.*}"
+    case "$major" in ''|*[!0-9]*) return 1 ;; esac
+    if [ "$major" -ge 26 ]; then
+        printf '%s\n' "$major"
+        return 0
+    fi
+    case "$v" in *.*) ;; *) return 1 ;; esac
+    minor="${v#*.}"
+    minor="${minor%%[!0-9]*}"
+    [ -n "$minor" ] || return 1
+    printf '%s.%s\n' "$major" "$minor"
+}
+
+# Every page of the repo's releases, appended to $1 as one JSON array per
+# page. Only a full page can have more behind it; anything else (short page,
+# API error object) ends the loop, and the selection reports API errors.
+fetch_release_pages() {
+    local out="$1" page=1 page_json page_len
+    : > "$out"
+    while :; do
+        page_json=$(curl -sS --max-time 30 "https://api.github.com/repos/${REPO}/releases?per_page=100&page=${page}") \
+            || { echo "ERROR: Failed to query GitHub releases" >&2; return 1; }
+        printf '%s\n' "$page_json" >> "$out"
+        page_len=$(printf '%s' "$page_json" | python3 -c "
+import sys, json
+try:
+    doc = json.load(sys.stdin)
+except Exception:
+    print(0)
+else:
+    print(len(doc) if isinstance(doc, list) else 0)
+")
+        [ "$page_len" -eq 100 ] || break
+        page=$((page + 1))
+    done
+}
+
+# Newest release approved for train $2 on a box running TrueNAS $1, chosen
+# from the release pages in $3. Prints its tag; explains on stderr and fails
+# when there is none.
+select_approved_release() {
+    VERSION="$1" TRAIN="$2" REPO="$REPO" python3 -c "
+# BEGIN release-selection (extracted verbatim by tests/test_release_selection.py;
+# single-quoted strings only, \x60 stands for backtick, no dollar signs: this
+# code lives inside a double-quoted bash string)
+import sys, json, os, re
+# stdin carries one JSON array per fetched API page, concatenated.
+decoder = json.JSONDecoder()
+text = sys.stdin.read()
+data = []
+pos = 0
+while pos < len(text):
+    if text[pos].isspace():
+        pos += 1
+        continue
+    try:
+        doc, pos = decoder.raw_decode(text, pos)
+    except ValueError:
+        print('Failed to parse GitHub API response', file=sys.stderr)
+        sys.exit(1)
+    if isinstance(doc, dict) and 'message' in doc:
+        msg = doc['message']
+        if 'rate limit' in msg.lower():
+            print('GitHub API rate limit exceeded (60 requests/hour for unauthenticated calls).', file=sys.stderr)
+            print('Wait a few minutes and try again.', file=sys.stderr)
+        else:
+            print(f'GitHub API error: {msg}', file=sys.stderr)
+        sys.exit(1)
+    elif isinstance(doc, list):
+        data.extend(doc)
+    else:
+        print('Failed to parse GitHub API response', file=sys.stderr)
+        sys.exit(1)
+if not text.strip():
+    print('Failed to parse GitHub API response', file=sys.stderr)
+    sys.exit(1)
+version = os.environ['VERSION']
+train = os.environ['TRAIN']
+repo = os.environ.get('REPO', '')
+# The channel (preview on a BETA/RC box, else stable) no longer decides what
+# installs: every box takes the newest release approved for its train. It
+# only picks which hardware-test issues the no-match message points at.
+vu = version.upper()
+is_preview = ('-BETA' in vu) or ('-RC' in vu)
+def preview_release(release):
+    # This repo's v<N> tags carry no BETA/RC marker (one release serves every
+    # train), so this never fires here; it keeps the approval gate below the
+    # same expression as in the per-kernel repos (coral, hailo, memryx).
+    tu = release.get('tag_name', '').upper()
+    return ('-BETA' in tu) or ('-RC' in tu)
+# Approval gate. promote.yml writes one verified-train line into the notes
+# for each train whose hardware test signed the release off. A release with a
+# line for this train is approved here; lines for other trains only are not.
+# A full release with no line at all predates per-train sign-off and is
+# grandfathered for every train. Nothing else qualifies: there is no fallback
+# to an unverified build, on stable or preview boxes.
+vt_re = re.compile(r'^[ \t]*<!--\s*verified-train:\s*([^\s>]+?)\s*-->', re.M)
+def verified_trains(release):
+    return set(vt_re.findall(release.get('body') or ''))
+def approved(release):
+    trains = verified_trains(release)
+    if trains:
+        return train in trains
+    return not release.get('prerelease') and not preview_release(release)
+def published(release):
+    return release.get('published_at') or release.get('created_at') or ''
+candidates = [r for r in data
+              if not r.get('draft')
+              and approved(r)]
+if not candidates:
+    print(f'No release is approved for TrueNAS train {train} yet (this box runs {version}).', file=sys.stderr)
+    print('A hardware test on a train approves a release for that train only, and nothing', file=sys.stderr)
+    print('unapproved is installed.', file=sys.stderr)
+    pending = sorted([r for r in data if not r.get('draft')], key=published, reverse=True)
+    if pending:
+        print('Newest releases waiting for a hardware test on this train:', file=sys.stderr)
+        for r in pending[:5]:
+            t = r.get('tag_name', '?')
+            mark = ' (prerelease)' if r.get('prerelease') else ''
+            print(f'  {t}{mark}', file=sys.stderr)
+    label = 'preview-hardware-test' if is_preview else 'hardware-test'
+    print('Open hardware tests (each issue title names its train):', file=sys.stderr)
+    print(f'  https://github.com/{repo}/issues?q=is%3Aissue+is%3Aopen+label%3A{label}', file=sys.stderr)
+    sys.exit(1)
+candidates.sort(key=published, reverse=True)
+print(candidates[0]['tag_name'], end='')
+# END release-selection
+" < "$3"
+}
+
+# The release to use on this box when none is pinned with --release: the
+# newest one approved for its train. Prints the tag.
+approved_release_tag() {
+    local version train pages tag
+    version=$(detect_truenas_version) || {
+        echo "ERROR: could not read the TrueNAS version (midclt call system.info)." >&2
+        echo "       Run this as root on TrueNAS, or pin a release with --release=TAG." >&2
+        return 1
+    }
+    train=$(truenas_train_key "$version") || {
+        echo "ERROR: cannot derive a TrueNAS train from version '${version}'" >&2
+        return 1
+    }
+    pages=$(mktemp) || return 1
+    if fetch_release_pages "$pages" && tag=$(select_approved_release "$version" "$train" "$pages"); then
+        rm -f "$pages"
+        echo "TrueNAS ${version} (train ${train}): newest approved release is ${tag}" >&2
+        printf '%s\n' "$tag"
+        return 0
+    fi
+    rm -f "$pages"
+    return 1
+}
+# END approved-release
+
 resolve_truenas_codename() {
     case "$1" in
         25.*) echo "Goldeye" ;;
@@ -206,55 +374,33 @@ resolve_truenas_codename() {
     esac
 }
 
-# Newest published release tag for the repo. Releases are tooling+catalog
-# snapshots tagged v<N> (not per-driver/per-TrueNAS), so we just take the
-# latest. Echoes the tag, or nothing on no-release / API error (caller treats
-# "nothing" as "use main").
-latest_release_tag() {
-    curl -sS --max-time 30 \
-        "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
-        | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-if isinstance(data, dict) and data.get('tag_name'):
-    print(data['tag_name'], end='')
-" 2>/dev/null || true
-}
-
 # Decide which release (if any) supplies the install tooling + catalog. Sets
 # globals RESOLVED_TAG and RELEASE_DL_BASE. Explicit --release is trusted
-# verbatim; otherwise use the repo's latest release. A full local checkout
-# needs no release (helpers are local). Releases don't pin a driver — this only
-# governs where the scripts + catalog come from.
+# verbatim; otherwise use the newest release a hardware test approved for this
+# box's TrueNAS train, and stop when there is none (never an unapproved
+# release, and never main). A full local checkout needs no release (helpers
+# are local). Releases don't pin a driver: this only governs where the
+# scripts + catalog come from.
 resolve_release_for_install() {
     if [ -n "$RELEASE_TAG" ]; then
         RESOLVED_TAG="$RELEASE_TAG"
     elif [ -n "${SCRIPT_DIR:-}" ] && [ -f "${SCRIPT_DIR}/build-nvidia-sysext.sh" ]; then
         return 0
     else
-        local tag
-        tag=$(latest_release_tag)
-        [ -n "$tag" ] || { echo "No published release found; using install tooling from main." >&2; return 0; }
-        RESOLVED_TAG="$tag"
+        RESOLVED_TAG=$(approved_release_tag) || exit 1
     fi
     RELEASE_DL_BASE="https://github.com/${REPO}/releases/download/${RESOLVED_TAG}"
     echo "Release: ${RESOLVED_TAG} (sourcing install tooling + catalog from its assets)" >&2
 }
 
-# Download a repo file, preferring the resolved release's (flat) assets —
-# version-pinned — and falling back to main. $1=asset basename,
-# $2=path-under-repo for the main fallback, $3=dest.
-fetch_repo_file() {
-    local asset="$1" main_rel="$2" dest="$3"
-    if [ -n "$RELEASE_DL_BASE" ] \
-        && curl -fL --retry 3 -o "$dest" "${RELEASE_DL_BASE}/${asset}" 2>/dev/null; then
-        return 0
-    fi
-    [ -z "$RELEASE_DL_BASE" ] || echo "WARN: '${asset}' not in release ${RESOLVED_TAG}; falling back to main" >&2
-    curl -fL --retry 3 -o "$dest" "${RAW_BASE}/${main_rel}"
+# Download one of the resolved release's (flat) assets to $2. No fallback to
+# main: main's copy is not the one a hardware test approved.
+fetch_release_asset() {
+    local asset="$1" dest="$2"
+    [ -n "$RELEASE_DL_BASE" ] \
+        || { echo "ERROR: no release resolved to fetch '${asset}' from" >&2; return 1; }
+    curl -fsSL --retry 3 -o "$dest" "${RELEASE_DL_BASE}/${asset}" \
+        || { echo "ERROR: '${asset}' could not be downloaded from release ${RESOLVED_TAG}" >&2; return 1; }
 }
 
 # Driver version out of an NVIDIA .run filename. Accepts both the no-compat32
@@ -328,7 +474,8 @@ stock_backup_problem() {
 # ─────────────────────────────────────────────────────────────────────────
 CATALOG_JSON=""
 load_catalog() {
-    # Priority: --catalog=PATH > local checkout copy > fetch from main.
+    # Priority: --catalog=PATH > local checkout copy > the resolved release's
+    # catalog > main's (only --list without a release gets that far).
     local candidate
     if [ -n "$CATALOG_PATH" ]; then
         [ -f "$CATALOG_PATH" ] || { echo "ERROR: --catalog not found: $CATALOG_PATH" >&2; exit 1; }
@@ -336,16 +483,14 @@ load_catalog() {
     elif [ -n "${SCRIPT_DIR:-}" ] && [ -f "${SCRIPT_DIR}/../catalog/driver-catalog.json" ]; then
         candidate="${SCRIPT_DIR}/../catalog/driver-catalog.json"
         CATALOG_JSON=$(cat "$candidate")
+    elif [ -n "$RELEASE_DL_BASE" ]; then
+        # The release's own catalog, never main's: tooling and catalog come
+        # from the same approved release.
+        CATALOG_JSON=$(curl -fsSL --retry 3 --max-time 30 "${RELEASE_DL_BASE}/driver-catalog.json") \
+            || { echo "ERROR: could not fetch driver-catalog.json from release ${RESOLVED_TAG}" >&2; exit 1; }
     else
-        # Prefer the resolved release's pinned catalog; fall back to main.
-        CATALOG_JSON=""
-        if [ -n "$RELEASE_DL_BASE" ]; then
-            CATALOG_JSON=$(curl -fsSL --retry 3 --max-time 30 "${RELEASE_DL_BASE}/driver-catalog.json" 2>/dev/null) || CATALOG_JSON=""
-        fi
-        if [ -z "$CATALOG_JSON" ]; then
-            CATALOG_JSON=$(curl -fsSL --retry 3 --max-time 30 "${RAW_BASE}/catalog/driver-catalog.json") \
-                || { echo "ERROR: could not fetch driver catalog from ${RAW_BASE}/catalog/driver-catalog.json" >&2; exit 1; }
-        fi
+        CATALOG_JSON=$(curl -fsSL --retry 3 --max-time 30 "${RAW_BASE}/catalog/driver-catalog.json") \
+            || { echo "ERROR: could not fetch driver catalog from ${RAW_BASE}/catalog/driver-catalog.json" >&2; exit 1; }
     fi
     # Validate it parses.
     printf '%s' "$CATALOG_JSON" | python3 -c 'import sys,json; json.load(sys.stdin)' 2>/dev/null \
@@ -693,9 +838,9 @@ stage_build_helpers() {
             if_real cp "${SCRIPT_DIR}/${f}" "${stage_dir}/${f}"
         else
             if $DRY_RUN; then
-                echo "[dry-run] would: fetch ${f} (release ${RESOLVED_TAG:-<none>} → main) to ${stage_dir}/${f}" >&2
+                echo "[dry-run] would: fetch ${f} from release ${RESOLVED_TAG:-<none>} to ${stage_dir}/${f}" >&2
             else
-                fetch_repo_file "${f}" "scripts/${f}" "${stage_dir}/${f}" \
+                fetch_release_asset "${f}" "${stage_dir}/${f}" \
                     || { echo "ERROR: failed to download helper: $f" >&2; return 1; }
             fi
         fi
@@ -852,6 +997,8 @@ except Exception:
 # Entry: --list / --check short-circuits
 # ─────────────────────────────────────────────────────────────────────────
 if $LIST_MODE; then
+    # A pinned release (get.sh always pins one) lists its own catalog.
+    [ -z "$RELEASE_TAG" ] || resolve_release_for_install
     load_catalog
     print_catalog
     exit 0
@@ -1292,8 +1439,8 @@ if [ -n "${SCRIPT_DIR:-}" ] && [ -f "${SCRIPT_DIR}/nvidia-preinit-driver.sh" ]; 
     cp "${SCRIPT_DIR}/nvidia-preinit-driver.sh" "$PREINIT_STAGE"
     echo "Staged PREINIT helper from local checkout"
 else
-    echo "Staging PREINIT helper (release ${RESOLVED_TAG:-<none>} → main)"
-    fetch_repo_file "nvidia-preinit-driver.sh" "scripts/nvidia-preinit-driver.sh" "$PREINIT_STAGE" \
+    echo "Staging PREINIT helper from release ${RESOLVED_TAG:-<none>}"
+    fetch_release_asset "nvidia-preinit-driver.sh" "$PREINIT_STAGE" \
         || { echo "ERROR: failed to download PREINIT helper — aborting BEFORE system changes" >&2; exit 1; }
 fi
 if $DRY_RUN; then

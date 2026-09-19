@@ -4,7 +4,30 @@ All notable changes to `nvidia-driver-support` are documented here.
 
 ## [Unreleased]
 
-### Fixed
+### Changed
+
+- **Releases are approved per TrueNAS train, and nothing unapproved is installed.** The new
+  one-liner is `curl -fsSL .../main/get.sh | sudo bash` (uninstall: `... | sudo bash -s --
+  --uninstall`). It derives the train from the TrueNAS version (the major from 26 on, so every
+  26.x including betas is `26`; major.minor before that, e.g. `25.10`), picks the newest release
+  approved for that train, and runs that release's installer (or uninstaller) with
+  `--release=<tag>`, so the tooling and catalog come from the same release. Approved means the
+  release notes carry `<!-- verified-train: <train> -->`, or it is a full release with no such
+  marker (every release from before this change, so v79 stays the release on both 25.10 and 26
+  until a newer one is approved). With nothing approved for the train it stops and links the
+  open hardware tests. `install-nvidia-driver.sh` run on its own applies the same rule instead
+  of taking GitHub's Latest, and no longer falls back to `main` for its helpers or catalog.
+  `--release=TAG` still pins any release.
+- **One hardware-test issue per train.** `release.yml` opens an issue per train in
+  `tracked-versions.json` (`hardware-test` for TrueNAS 25.10, `preview-hardware-test` for the
+  TrueNAS 26 beta), each naming its train in the title and body. Closing one as completed
+  approves the release for that train only (`promote.yml` adds the marker); the first approval
+  also turns the pre-release into a full release and appends the changelog. GitHub's "Latest"
+  now follows the newest release approved for a stable train and is cosmetic. Issues from
+  before this change (no train marker) promote exactly as before.
+- **`release.yml` no longer has the `mark_latest` input.** A full release without markers is
+  approved for every train, so publishing one straight to Latest would reach every box
+  untested. Every release now starts as a pre-release.
 
 - **A stale stock backup is no longer restored.** `nvidia-original.raw` holds the stock driver
   of the TrueNAS version it was made on; after an update that changed the kernel (seen on

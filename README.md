@@ -4,10 +4,14 @@ Install **any** NVIDIA driver on TrueNAS by swapping the stock driver sysext for
 
 ```bash
 # On TrueNAS, as root — detects your card and recommends a driver:
-curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-driver-support/main/scripts/install-nvidia-driver.sh \
-  | sudo bash
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-driver-support/main/get.sh | sudo bash
 ```
-Then reboot if install was ok.
+Then reboot if install was ok. To go back to the stock driver later:
+```bash
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-driver-support/main/get.sh | sudo bash -s -- --uninstall
+```
+
+`get.sh` runs the installer from the newest release that a hardware test approved for your TrueNAS train (25.10, or 26 for every 26.x including betas); see [Releases](#releases).
 
 > **Driver-only.** This repo owns the **driver swap**. If you want **MIG** on a Blackwell card, install [`nvidia-mig-support`](https://github.com/truenas-community-sysexts/nvidia-mig-support) after the reboot. The MIG sysext layers on top of whatever driver is present.  see [MIG coexistence](#coexistence-with-nvidia-mig-support).)
 
@@ -39,7 +43,7 @@ A card **newer than the host's PCI database** (e.g. a just-released GPU) won't h
 `--list` prints the live catalog with exact versions **and module flavor**. Through the `curl … | sudo bash` one-liner, flags for the script go after `bash -s --` (otherwise they're consumed by `curl`/`bash`):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-driver-support/main/scripts/install-nvidia-driver.sh | sudo bash -s -- --list
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-driver-support/main/get.sh | sudo bash -s -- --list
 ```
 
 ## Ways to choose a driver
@@ -83,10 +87,12 @@ Nothing pre-built is downloaded: NVIDIA's EULA prohibits redistributing the prop
 
 A release is a **tooling + catalog snapshot**, tagged `v<N>` (an auto-incrementing counter). It carries the install scripts + the driver catalog (the whole supported matrix) — never a prebuilt driver, since the EULA point above means `nvidia.raw` is always built on your host. **It is not tied to a driver, module flavor, or TrueNAS version**: the install script reads the bundled catalog, detects your card, and builds the right driver against your host's kernel, so one release covers everything and works across TrueNAS versions (a kernel bump just triggers an on-host rebuild).
 
-The install one-liner pulls the repo's **latest** release for its tooling + catalog (falling back to `main` when none exists). To pin an exact, reproducible snapshot:
+**Each release is approved per TrueNAS train.** A release starts as a pre-release with one hardware-test issue per supported train, and closing a train's issue as completed approves it for that train's boxes only. The one-liner (`get.sh`) runs the installer, tooling and catalog of the newest release approved for your train (full releases from before per-train approval count for every train); if there is none yet, it stops and points at the open hardware tests instead of installing anything untested.
+
+To pin an exact, reproducible snapshot (this skips the approval check, which is how a tester installs a release under test):
 
 ```bash
-curl -fsSL .../scripts/install-nvidia-driver.sh | sudo bash -s -- --release=v5
+curl -fsSL .../main/get.sh | sudo bash -s -- --release=v5
 ```
 
 `--release` only pins the tooling + catalog snapshot — driver selection is unchanged (card-detect / `--branch` / `--driver` / `--custom-run` / `--run-url`).
@@ -112,7 +118,7 @@ sudo uninstall-nvidia-driver               # revert to stock (reboot) — bundle
 
 ```bash
 sudo /mnt/<pool>/.config/nvidia-gpu/scripts/uninstall-nvidia-driver.sh   # persisted copy (survives unmerge)
-curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-driver-support/main/scripts/uninstall-nvidia-driver.sh | sudo bash   # last resort (no local copy)
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-driver-support/main/get.sh | sudo bash -s -- --uninstall   # last resort (no local copy)
 ```
 
 ## After a TrueNAS update
@@ -120,7 +126,7 @@ curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-dr
 The PREINIT restores your custom driver automatically when an update wipes `/usr`. If the update **bumped the kernel**, the bundled `nvidia.ko` no longer matches — `journalctl -b -t nvidia-preinit-driver` logs a loud kernel-mismatch error. Re-run the install one-liner (or the staged `build-on-host.sh`) to rebuild against the new kernel:
 
 ```bash
-curl -fsSL .../scripts/install-nvidia-driver.sh | sudo bash -s -- --rebuild
+curl -fsSL .../main/get.sh | sudo bash -s -- --rebuild
 ```
 
 A kernel bump also leaves the stock backup (`nvidia-original.raw`) stale: it holds the stock driver for the old kernel. The installer and the uninstaller refuse a stale backup (`--check` warns about it), so refresh it before that rebuild. Run without flags, it fetches the stock driver of the running TrueNAS version and overwrites the old backup (downloads about 2 GB):
@@ -133,6 +139,7 @@ curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-dr
 
 | Script | What it does |
 | --- | --- |
+| [`get.sh`](get.sh) | The one-liner entry point: picks the newest release approved for this box's TrueNAS train and runs that release's installer (or, with `--uninstall`, its uninstaller). `--release=TAG` pins one. |
 | [`install-nvidia-driver.sh`](scripts/install-nvidia-driver.sh) | Picks a driver (card-detect / `--branch` / `--driver` / `--custom-run` / `--run-url`), builds `nvidia.raw` on-host, swaps the stock driver, registers the restore PREINIT. `--list`, `--check`, `--dry-run`. |
 | [`build-nvidia-sysext.sh`](scripts/build-nvidia-sysext.sh) | The driver build itself. Branch-aware installer flags (drops `--kernel-module-type` etc. for pre-515 legacy installers). Runs in CI as a smoke test and inside the on-host container. |
 | [`build-on-host.sh`](scripts/build-on-host.sh) | Wraps the build in `docker run --rm ubuntu:24.04`; caches the TrueNAS `.update` + NVIDIA `.run`. |

@@ -4,20 +4,24 @@ on:
   push:
     branches: [main]
     paths:
+      - 'get.sh'
       - 'scripts/**.sh'
       - '.github/scripts/**'
       - '.github/workflows/**.yml'
       - 'catalog/driver-catalog.json'
       - '.github/tracked-versions.json'
       - 'third_party/**'
+      - 'tests/**'
   pull_request:
     paths:
+      - 'get.sh'
       - 'scripts/**.sh'
       - '.github/scripts/**'
       - '.github/workflows/**.yml'
       - 'catalog/driver-catalog.json'
       - '.github/tracked-versions.json'
       - 'third_party/**'
+      - 'tests/**'
   workflow_dispatch:
 
 permissions:
@@ -32,6 +36,7 @@ jobs:
       - name: Run shellcheck
         run: |
           shellcheck --severity=warning \
+            get.sh \
             scripts/build-nvidia-sysext.sh \
             scripts/build-on-host.sh \
             scripts/install-nvidia-driver.sh \
@@ -71,19 +76,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Validate tracked-versions.json
-        run: |
-          python3 - <<'PY'
-          import json, re, sys
-          with open(".github/tracked-versions.json") as f:
-              d = json.load(f)
-          tn = d.get("truenas", {})
-          if not re.match(r'^\d+\.\d+', str(tn.get("version", ""))):
-              print("truenas.version missing or malformed", file=sys.stderr); sys.exit(1)
-          if not tn.get("train"):
-              print("truenas.train missing", file=sys.stderr); sys.exit(1)
-          print("tracked-versions.json OK")
-          PY
+      - run: .github/scripts/validate-tracked-versions.sh
 
   actionlint:
     name: actionlint workflows
@@ -105,3 +98,13 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends squashfs-tools
       - run: .github/scripts/test-stock-backup-guards.sh
+
+  python-tests:
+    name: release selection, promote and issue tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Runs get.sh's shared selection code, and promote.yml's and
+      # release.yml's github-script under node with stub clients.
+      - name: Run unit tests
+        run: python3 -m unittest discover -s tests -v

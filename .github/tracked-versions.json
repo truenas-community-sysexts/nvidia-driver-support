@@ -1,7 +1,11 @@
 {
-  "_comment": "TrueNAS target for the CI smoke build (build-sysext.yml). Driver versions live in catalog/driver-catalog.json (refreshed by check-drivers.yml); releases are tooling+catalog snapshots and don't pin a driver, so no nvidia version is tracked here.",
+  "_comment": "truenas: the TrueNAS target for the CI smoke build (build-sysext.yml). trains: every TrueNAS train a release supports. release.yml opens one hardware-test issue per train (label hardware-test for a stable train, preview-hardware-test for a preview one); closing it as completed approves the release for that train only (promote.yml), and get.sh installs only releases approved for the box's train. key is the train key get.sh derives from the TrueNAS version (major from 26 on, major.minor before). Driver versions live in catalog/driver-catalog.json (refreshed by check-drivers.yml); releases are tooling+catalog snapshots and don't pin a driver, so no nvidia version is tracked here.",
   "truenas": {
     "version": "25.10.4",
     "train": "Goldeye"
-  }
+  },
+  "trains": [
+    {"key": "25.10", "name": "TrueNAS 25.10", "channel": "stable"},
+    {"key": "26", "name": "TrueNAS 26 beta", "channel": "preview"}
+  ]
 }
