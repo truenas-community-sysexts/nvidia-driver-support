@@ -6,6 +6,13 @@ All notable changes to `nvidia-driver-support` are documented here.
 
 ### Fixed
 
+- **Daily catalog refresh no longer flip-flops the latest open driver.** NVIDIA's
+  `latest.txt` is served through Akamai, and different edges held stale copies (595.58.03,
+  595.84, 595.91.07, 595.99.02), so each day's run could see a different "latest", rewrite
+  `open_latest`, and cut a new prerelease plus hardware-test issue (v41 to v77 were almost all
+  these flips). `refresh-catalog.py` now never lets the production ceiling drop below the one
+  already committed; a stale edge is logged and ignored, while a genuinely newer production
+  version still moves the catalog forward.
 - **`install-nvidia-driver.sh` now restores the GPU release it does before the swap.** To
   free the GPU the install stops GPU-bound apps (`app.stop`) and toggles `docker.config.nvidia`
   off — but it never turned them back on, so after the swap + reboot apps came back with the
