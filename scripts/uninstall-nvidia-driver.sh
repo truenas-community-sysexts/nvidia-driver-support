@@ -20,7 +20,7 @@
 #   sudo ./uninstall-nvidia-driver.sh
 #   sudo ./uninstall-nvidia-driver.sh --keep-cache        # keep the ~2 GB build cache
 #   sudo ./uninstall-nvidia-driver.sh --keep-persist      # remove nothing from persist dir
-#   sudo ./uninstall-nvidia-driver.sh --skip-backup-check # revert without nvidia-original.raw
+#   sudo ./uninstall-nvidia-driver.sh --skip-backup-check # revert without a usable nvidia-original.raw
 
 set -euo pipefail
 
@@ -32,7 +32,7 @@ for arg in "$@"; do
         --keep-persist) KEEP_PERSIST=true ;;
         --keep-cache) KEEP_CACHE=true ;;
         --skip-backup-check) SKIP_BACKUP_CHECK=true ;;
-        -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "Unknown arg: $arg" >&2; exit 2 ;;
     esac
 done
@@ -56,6 +56,37 @@ trap restore_state EXIT INT TERM
 
 SYSEXT_DIR="/usr/share/truenas/sysext-extensions"
 LIVE_NVIDIA="${SYSEXT_DIR}/nvidia.raw"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Stock-backup freshness. Duplicated verbatim in install-nvidia-driver.sh,
+# uninstall-nvidia-driver.sh and recover-stock-nvidia.sh (each stays a
+# self-contained curl|bash artifact); keep the copies in sync.
+#
+# nvidia-original.raw holds the stock driver of the TrueNAS version it was
+# made on. After a TrueNAS update that changed the kernel, its modules are for
+# the old kernel, and restoring it would put a driver on the system that
+# cannot load. It is usable only if it ships modules for the running kernel.
+# ─────────────────────────────────────────────────────────────────────────
+
+# Kernel versions a sysext image ships modules for (usr/lib/modules/<kver>/),
+# space-separated. Empty when it ships none or cannot be read.
+raw_module_kernels() {
+    unsquashfs -l "$1" 'usr/lib/modules/*' 2>/dev/null \
+        | sed -nE 's|^[^/]*/usr/lib/modules/([^/]+)/.*|\1|p' \
+        | sort -u | paste -sd ' ' - || true
+}
+
+# Why a stock nvidia.raw can't be restored on this system; prints nothing
+# when it can. "missing", or "stale:<kernels it has modules for>".
+stock_backup_problem() {
+    local raw="$1" kvers
+    [ -f "$raw" ] || { echo "missing"; return 0; }
+    kvers=$(raw_module_kernels "$raw")
+    case " ${kvers} " in
+        *" $(uname -r) "*) ;;
+        *) echo "stale:${kvers:-none found}" ;;
+    esac
+}
 
 # ── State detection ──
 PERSIST_DIR=""
@@ -93,6 +124,33 @@ EOF
     exit 1
 fi
 
+# Never restore a stale backup: one made before a TrueNAS update that changed
+# the kernel holds the old kernel's stock driver, which cannot load here.
+# --skip-backup-check then means "uninstall without restoring stock", exactly
+# as it does when the backup is missing.
+if [ -n "$ORIGINAL" ]; then
+    command -v unsquashfs >/dev/null 2>&1 \
+        || { echo "ERROR: unsquashfs not found (squashfs-tools); cannot check $ORIGINAL" >&2; exit 1; }
+    BACKUP_PROBLEM=$(stock_backup_problem "$ORIGINAL")
+    if [ -n "$BACKUP_PROBLEM" ] && ! $SKIP_BACKUP_CHECK; then
+        cat >&2 <<EOF
+ERROR: ${ORIGINAL} is stale.
+       It has kernel modules for: ${BACKUP_PROBLEM#stale:}
+       This system runs kernel:   $(uname -r)
+       Refusing to restore it: that stock driver cannot load on this
+       kernel. Refresh the backup (downloads about 2 GB and overwrites
+       the stale one), then re-run the uninstall:
+         curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-driver-support/main/scripts/recover-stock-nvidia.sh | sudo bash
+       Or pass --skip-backup-check to uninstall without restoring stock
+       (the custom nvidia.raw then stays live until the next TrueNAS update).
+EOF
+        exit 1
+    elif [ -n "$BACKUP_PROBLEM" ]; then
+        echo "WARN: ${ORIGINAL} is stale (kernel modules for: ${BACKUP_PROBLEM#stale:}; running: $(uname -r)); not restoring it (--skip-backup-check)"
+        ORIGINAL=""
+    fi
+fi
+
 # ── Stop GPU apps + free the GPU before the swap ──
 echo "Stopping app services..."
 midclt call -j docker.update '{"nvidia": false}' >/dev/null \
@@ -126,7 +184,7 @@ if [ -n "$ORIGINAL" ]; then
     mkdir -p /etc/extensions
     ln -sf "$LIVE_NVIDIA" /etc/extensions/nvidia.raw
 else
-    echo "WARN: no nvidia-original.raw backup; leaving live nvidia.raw in place"
+    echo "WARN: no usable nvidia-original.raw backup; leaving live nvidia.raw in place"
     echo "      (run recover-stock-nvidia.sh later to fetch one)"
 fi
 
