@@ -69,8 +69,9 @@ jobs:
 
       # New drivers landed in the catalog → cut a gated release: release.yml
       # runs the full build matrix (CI), and on green publishes a PRERELEASE +
-      # opens a hardware-test issue. Closing that issue promotes it to Latest
-      # (promote.yml). Same auto-update shape as the other repos' check-*.
+      # opens one hardware-test issue per TrueNAS train. Closing a train's
+      # issue approves the release for that train (promote.yml). Same
+      # auto-update shape as the other repos' check-*.
       # (The catalog commit carries [skip ci], so this explicit dispatch is the
       # only thing that runs — via the app token, which has actions:write.)
       - name: Cut a gated prerelease for the new drivers
@@ -87,8 +88,7 @@ jobs:
               workflow_id: 'release.yml',
               ref: 'main',
               inputs: {
-                mark_latest: 'false',
                 change_summary: process.env.CHANGE_SUMMARY || ''
               }
             });
-            console.log('Dispatched release.yml (mark_latest=false) after catalog bump');
+            console.log('Dispatched release.yml after catalog bump');

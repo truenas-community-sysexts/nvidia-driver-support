@@ -1,11 +1,26 @@
 name: Promote release on hardware-test sign-off
 
-# When a `hardware-test` issue is closed as completed, promote the prerelease
-# it gates: flip it from prerelease to a full release marked "Latest", and
-# append a changelog (GitHub's PR-based auto-notes + a commit list, since most
-# changes here land as direct pushes that PR-notes miss). The release tag is
-# read from a `<!-- release-tag: vX -->` marker the build writes into the issue
-# body, so this is independent of issue-title formatting.
+# A hardware test on a TrueNAS train approves a release for that train's
+# boxes only. release.yml opens one issue per supported train (label
+# `hardware-test` for a stable train, `preview-hardware-test` for a preview
+# one), each with `<!-- release-tag: vX -->` and `<!-- train: KEY -->`
+# markers, so this is independent of issue-title formatting. When one is
+# closed as completed:
+#   - `<!-- verified-train: KEY -->` is appended to the release notes, once.
+#     get.sh and install-nvidia-driver.sh install a release on a train only
+#     when its notes carry that train's marker, or when it is a full release
+#     with no marker at all (from before per-train sign-off, approved for
+#     every train);
+#   - on the release's first approval it also flips from prerelease to a full
+#     release and gets a changelog (GitHub's PR-based auto-notes + a commit
+#     list, since most changes here land as direct pushes that PR-notes miss).
+#     Marker, flip and changelog go in ONE update: a full release without the
+#     marker would count as approved for every train, even for a moment;
+#   - GitHub's "Latest" follows the newest release approved for a stable
+#     train. It is cosmetic: nothing selects by it any more.
+# An issue with no train marker predates per-train issues and keeps the old
+# behavior: full release, marked Latest, no marker (so every train).
+# Closed as "not planned": no change.
 #
 # Editing a release does not touch the protected branch, so the default
 # GITHUB_TOKEN (contents: write) is sufficient — no app token needed.
@@ -22,16 +37,65 @@ jobs:
   promote:
     # Only hardware-test issues closed as "completed" (not "not planned").
     if: >-
-      contains(github.event.issue.labels.*.name, 'hardware-test') &&
+      (contains(github.event.issue.labels.*.name, 'hardware-test') ||
+       contains(github.event.issue.labels.*.name, 'preview-hardware-test')) &&
       github.event.issue.state_reason == 'completed'
     runs-on: ubuntu-latest
     steps:
-      - name: Promote the prerelease this issue gates
+      # For .github/tracked-versions.json: which trains are stable.
+      - uses: actions/checkout@v7
+
+      - name: Record the sign-off on the release this issue gates
         uses: actions/github-script@v9
         with:
           script: |
             const issue = context.payload.issue;
             const { owner, repo } = context.repo;
+
+            // Pure helpers, defined up front so the guards below can use
+            // them. Same shape as coral-pcie-support's promote-ranking block
+            // (previewVer / previewRelease / rankOf / cmpRank /
+            // decideMakeLatest); tests/test_promote.py runs this whole script
+            // under node with a stub GitHub client.
+            // BEGIN promote-ranking
+            // Canonical preview rule (keep in sync with get.sh's
+            // preview_release): preview iff the string contains -BETA or -RC,
+            // case-insensitive.
+            const previewVer = (s) => /-(?:BETA|RC)/i.test(s || '');
+            const previewRelease = (r) => previewVer(r.tag_name);
+            // Trains a release is approved for: one verified-train line each
+            // (same pattern as get.sh's selection).
+            const verifiedTrains = (r) => new Set(
+              [...(r.body || '').matchAll(/^[ \t]*<!--\s*verified-train:\s*([^\s>]+?)\s*-->/gm)].map((m) => m[1]));
+            // Approved for any of the train keys: a marker for one of them, or
+            // grandfathered (a full release with no marker at all).
+            const approvedFor = (r, keys) => {
+              const trains = verifiedTrains(r);
+              if (trains.size) return keys.some((k) => trains.has(k));
+              return !r.prerelease && !previewRelease(r);
+            };
+            // Tags are v<run_number>, so the run number is the whole rank.
+            const rankOf = (r) => {
+              const m = (r.tag_name || '').match(/^v(\d+)$/);
+              return m ? { run: Number(m[1]) } : null;
+            };
+            const cmpRank = (a, b) => a.run - b.run;
+            // Latest = the newest release approved for a stable train. rel is
+            // the release as it will be after this update.
+            const decideMakeLatest = (rel, others, stableKeys) => {
+              const thisVer = approvedFor(rel, stableKeys) ? rankOf(rel) : null;
+              let newest = thisVer;
+              for (const r of others) {
+                // Prereleases can't be Latest, and neither can a release no
+                // stable train approved (verified on a preview train only).
+                if (r.prerelease || !approvedFor(r, stableKeys)) continue;
+                const v = rankOf(r);
+                if (v && (!newest || cmpRank(v, newest) > 0)) newest = v;
+              }
+              const makeLatest = (thisVer && newest && cmpRank(thisVer, newest) >= 0) ? 'true' : 'false';
+              return { makeLatest, newest };
+            };
+            // END promote-ranking
 
             const m = (issue.body || '').match(/<!--\s*release-tag:\s*(\S+?)\s*-->/);
             if (!m) {
@@ -39,6 +103,8 @@ jobs:
               return;
             }
             const tag = m[1];
+            const train = ((issue.body || '').match(/<!--\s*train:\s*(\S+?)\s*-->/) || [])[1] || '';
+            const labels = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l.name));
 
             let release;
             try {
@@ -52,47 +118,112 @@ jobs:
               throw e;
             }
 
-            if (!release.prerelease) {
+            const rels = (await github.paginate(github.rest.repos.listReleases, { owner, repo, per_page: 100 }))
+              .filter(r => r.id !== release.id && !r.draft)
+              .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+            // Changelog for a release's first approval. The previous release
+            // that was approved anywhere (a full release) bounds the range:
+            // an interleaved unapproved prerelease would bound it at the
+            // wrong release and publish a short or wrong commit list.
+            const changelogFor = async () => {
+              const prev = rels.find(r => !r.prerelease && !previewRelease(r) &&
+                new Date(r.created_at) <= new Date(release.created_at));
+
+              // GitHub's PR-based auto-notes.
+              let prNotes = '';
+              try {
+                const gen = await github.rest.repos.generateReleaseNotes({ owner, repo, tag_name: tag,
+                  ...(prev ? { previous_tag_name: prev.tag_name } : {}) });
+                prNotes = (gen.data.body || '').trim();
+              } catch (e) { core.warning(`generate-notes failed: ${e.message}`); }
+
+              // Commit list: captures the direct/app pushes PR-notes don't.
+              let commits = '';
+              if (prev) {
+                try {
+                  const cmp = await github.rest.repos.compareCommitsWithBasehead({ owner, repo,
+                    basehead: `${prev.tag_name}...${tag}` });
+                  commits = (cmp.data.commits || [])
+                    .map(c => `- ${c.commit.message.split('\n')[0]} (\`${c.sha.slice(0, 7)}\`)`)
+                    .join('\n');
+                } catch (e) { core.warning(`compare failed: ${e.message}`); }
+              }
+
+              let changelog = '\n\n## Changelog\n';
+              if (prNotes) changelog += `\n${prNotes}\n`;
+              if (commits) changelog += `\n### Commits\n${commits}\n`;
+              if (!prNotes && !commits) changelog += '\n_Initial release._\n';
+              return changelog;
+            };
+
+            // An issue from before per-train issues (no train marker): the
+            // old behavior, full release + Latest with no marker, so it stays
+            // approved for every train. Only a stable hardware-test issue can
+            // do that; a preview one must say which train it approves.
+            if (!train) {
+              if (!labels.includes('hardware-test')) {
+                await github.rest.issues.createComment({ owner, repo, issue_number: issue.number,
+                  body: `This issue has no \`<!-- train: KEY -->\` marker, so it does not say which TrueNAS train it approves [\`${tag}\`](${release.html_url}) for. No change was made.` });
+                return;
+              }
+              if (!release.prerelease) {
+                await github.rest.issues.createComment({ owner, repo, issue_number: issue.number,
+                  body: `Release [\`${tag}\`](${release.html_url}) is already promoted (not a prerelease). No change.` });
+                return;
+              }
+              await github.rest.repos.updateRelease({ owner, repo, release_id: release.id,
+                prerelease: false, make_latest: 'true',
+                body: (release.body || '') + await changelogFor() });
               await github.rest.issues.createComment({ owner, repo, issue_number: issue.number,
-                body: `ℹ️ Release [\`${tag}\`](${release.html_url}) is already promoted (not a prerelease). No change.` });
+                body: `Verified: promoted [\`${tag}\`](${release.html_url}) to the latest release and appended the changelog.` });
+              core.info(`Promoted ${tag} to latest (issue without a train marker).`);
               return;
             }
 
-            // Previous release (by created_at) bounds the changelog range.
-            const rels = (await github.rest.repos.listReleases({ owner, repo, per_page: 100 })).data
-              .filter(r => r.id !== release.id && !r.draft)
-              .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-            const prev = rels.find(r => new Date(r.created_at) <= new Date(release.created_at));
+            if (!/^\d+(\.\d+)?$/.test(train)) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: issue.number,
+                body: `The train marker \`${train}\` is not a TrueNAS train key (e.g. 25.10 or 26). No change was made.` });
+              return;
+            }
+            const tracked = JSON.parse(require('fs').readFileSync('.github/tracked-versions.json', 'utf8'));
+            const trains = tracked.trains || [];
+            const stableKeys = trains.filter((t) => t.channel === 'stable').map((t) => t.key);
+            const trainName = (trains.find((t) => t.key === train) || {}).name || `TrueNAS ${train}`;
+            const link = `[\`${tag}\`](${release.html_url})`;
 
-            // GitHub's PR-based auto-notes.
-            let prNotes = '';
-            try {
-              const gen = await github.rest.repos.generateReleaseNotes({ owner, repo, tag_name: tag,
-                ...(prev ? { previous_tag_name: prev.tag_name } : {}) });
-              prNotes = (gen.data.body || '').trim();
-            } catch (e) { core.warning(`generate-notes failed: ${e.message}`); }
-
-            // Commit list — captures the direct/app pushes PR-notes don't.
-            let commits = '';
-            if (prev) {
-              try {
-                const cmp = await github.rest.repos.compareCommitsWithBasehead({ owner, repo,
-                  basehead: `${prev.tag_name}...${tag}` });
-                commits = (cmp.data.commits || [])
-                  .map(c => `- ${c.commit.message.split('\n')[0]} (\`${c.sha.slice(0, 7)}\`)`)
-                  .join('\n');
-              } catch (e) { core.warning(`compare failed: ${e.message}`); }
+            const approved = verifiedTrains(release);
+            if (approved.has(train)) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: issue.number,
+                body: `${link} is already approved for ${trainName} (train \`${train}\`). No change.` });
+              return;
+            }
+            // A full release with no marker is already approved for every
+            // train. A marker would narrow that to this train alone.
+            if (!release.prerelease && approved.size === 0) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: issue.number,
+                body: `${link} is a full release from before per-train sign-off, so it is already approved for every train. No change.` });
+              return;
             }
 
-            let changelog = '\n\n## Changelog\n';
-            if (prNotes) changelog += `\n${prNotes}\n`;
-            if (commits) changelog += `\n### Commits\n${commits}\n`;
-            if (!prNotes && !commits) changelog += '\n_Initial release._\n';
+            const first = release.prerelease;
+            let body = release.body || '';
+            if (first) body += await changelogFor();
+            body += `\n\n<!-- verified-train: ${train} -->\n`;
+
+            const { makeLatest, newest } = decideMakeLatest(
+              { ...release, prerelease: false, body }, rels, stableKeys);
 
             await github.rest.repos.updateRelease({ owner, repo, release_id: release.id,
-              prerelease: false, make_latest: 'true',
-              body: (release.body || '') + changelog });
+              prerelease: false, make_latest: makeLatest, body });
 
+            const notes = [`Verified on ${trainName}: ${link} is now approved for train \`${train}\`, so \`get.sh\` installs it on ${trainName} boxes.`];
+            if (first) notes.push('This was its first approval: it is now a full release, and the changelog was appended.');
+            if (makeLatest === 'true') {
+              notes.push('It is also marked Latest (the newest release approved for a stable train).');
+            } else if (stableKeys.includes(train) && newest) {
+              notes.push(`Latest stays on the newer \`v${newest.run}\`.`);
+            }
             await github.rest.issues.createComment({ owner, repo, issue_number: issue.number,
-              body: `✅ Verified — promoted [\`${tag}\`](${release.html_url}) to the latest release and appended the changelog.` });
-            core.info(`Promoted ${tag} to latest.`);
+              body: notes.join(' ') });
+            core.info(`Approved ${tag} for train ${train} (first=${first}, make_latest=${makeLatest}).`);
