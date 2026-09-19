@@ -113,10 +113,20 @@ kernel. So one release covers the whole driver × kmod × card matrix and works 
 versions — a kernel bump just triggers an on-host rebuild. (This is why the old
 `v<truenas>-nvidia<driver>-rN` scheme, inherited from the Blackwell-only MIG repo, didn't fit.)
 
-- [`release.yml`](../.github/workflows/release.yml) — a single `publish` job, **zero inputs**:
-  checkout → generate notes from the catalog (so the "supported" list can't drift) → tag `v<N>`
-  and attach the scripts + catalog. Nothing is built; always promoted to "Latest" (every cut is
-  deliberate). Run it manually whenever the tooling or catalog has changed enough to publish.
+- [`release.yml`](../.github/workflows/release.yml): runs the full `build-sysext.yml` smoke
+  matrix, then generates notes from the catalog (so the "supported" list can't drift), tags
+  `v<N>`, attaches the scripts + catalog, and publishes a **pre-release**. It then opens one
+  hardware-test issue per TrueNAS train listed in `.github/tracked-versions.json` (`trains`):
+  label `hardware-test` for a stable train, `preview-hardware-test` for a preview one, with
+  `<!-- release-tag -->` and `<!-- train -->` markers. It has no publish-straight-to-Latest
+  option (see below). check-drivers.yml dispatches it after a catalog change; run it by hand
+  whenever the tooling has changed enough to publish.
+- [`promote.yml`](../.github/workflows/promote.yml): closing a train's issue as completed
+  approves the release for that train only: it appends `<!-- verified-train: KEY -->` to the
+  release notes, and on the first approval also flips the release out of pre-release and
+  appends the changelog, in the same update. GitHub's "Latest" follows the newest release
+  approved for a stable train, but nothing selects by it. An issue with no train marker (from
+  before per-train issues) keeps the old behavior: full release, Latest, no marker.
 - [`check-drivers.yml`](../.github/workflows/check-drivers.yml) — daily; refreshes the picker
   catalog from the NVIDIA index. `open_latest` is newest-per-major, bounded by `latest.txt`
   (NVIDIA's blessed production latest — so betas / not-yet-promoted versions never appear) and
@@ -127,7 +137,31 @@ versions — a kernel bump just triggers an on-host rebuild. (This is why the ol
 Build validation lives entirely in the smoke (`build-sysext.yml`) on PRs that touch the build
 path, plus the user's on-host build — never in the release path.
 
-`install-nvidia-driver.sh` sources its tooling + catalog from the repo's **latest** release (or
-`--release=TAG` to pin), falling back to `main` when none exists — so installs work before any
-release is cut. A release only affects *sourcing*; driver selection stays card-detect /
-`--branch` / `--driver` / `--custom-run`.
+### Which release a box installs
+
+The one-liner is [`get.sh`](../get.sh) on `main`. It reads the TrueNAS version
+(`midclt call system.info`), derives the **train** (the major version from 26 on, so every
+26.x release including betas is train `26`; major.minor before that, e.g. `25.10`), lists the
+releases through the GitHub API, and picks the newest one **approved** for that train:
+
+- its notes carry `<!-- verified-train: <train> -->`, or
+- it is a full (non-pre-release) release with no `verified-train` marker at all. Every release
+  published before per-train approval is one of these, so they stay approved for every train.
+
+A marker for another train only does not count, and nothing unapproved is installed on stable or
+beta boxes: with no approved release for the train it stops and links the open hardware-test
+issues. It then downloads **that** release's `install-nvidia-driver.sh` (or, with `--uninstall`,
+its `uninstall-nvidia-driver.sh`) and runs it with the user's arguments plus `--release=<tag>`,
+so the installer's own downloads (build helpers, PREINIT helper, catalog) come from the same
+release, with no fallback to `main`. `--release=TAG` skips the selection.
+
+`install-nvidia-driver.sh` run on its own (a raw download from `main`) resolves its release by
+the same rule: the selection code is one block copied verbatim into both scripts, and
+`tests/test_release_selection.py` fails CI if the copies differ. Run from a full checkout it
+uses the checkout's own helpers and catalog. A release only affects *sourcing*; driver
+selection stays card-detect / `--branch` / `--driver` / `--custom-run`.
+
+Why there is no publish-straight-to-Latest option: a full release without markers counts as
+approved for every train, so it would reach every box untested. Every release starts as a
+pre-release and becomes a full release only through a train's sign-off, which writes the marker
+in the same update.
