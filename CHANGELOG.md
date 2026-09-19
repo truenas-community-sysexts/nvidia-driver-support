@@ -67,6 +67,18 @@ All notable changes to `nvidia-driver-support` are documented here.
   (mirroring `--update-file`) and bridges through root-owned `/var/cache/nvidia-sysext-stage`
   (0700, no world-writable `/tmp` paths trusted or executed as root). Backfill copies only
   genuinely fresh downloads instead of rewriting multi-GB cache entries every build.
+- **Kepler (`legacy-470`) builds work from the install one-liner again** (#92). The 470 build
+  patches the driver with the community `nvidia-470xx-linux-mainline` set, a git submodule
+  under `third_party/`. The one-liner and `--release` stage only the scripts, and
+  `build-on-host.sh` never mounted `third_party/` into the build container, so every on-host
+  470 build failed with "470 patch set missing"; CI passed only because it checked out
+  submodules. `build-nvidia-sysext.sh` now downloads the patch set from upstream at the pinned
+  commit (`PATCH_470XX_COMMIT`) when there is no local copy, on the user's host at build time
+  (upstream publishes no license, so this repo does not ship the patches itself).
+  `build-on-host.sh` mounts a host copy when one sits next to the scripts (a clone with
+  submodules, or `/mnt/<pool>/.config/nvidia-gpu/third_party/`). CI's `legacy-470` smoke
+  build now checks out without submodules, so it takes the same download path, and lint
+  fails if the pin and the submodule commit differ.
 
 ### Added
 

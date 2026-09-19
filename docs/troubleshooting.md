@@ -42,6 +42,20 @@ See [legacy-cards.md](legacy-cards.md#making-a-best-effort-card-work-patched-run
 visible and check whether NVIDIA changed the `.run` (the CI smoke build catches most of
 these first).
 
+## `Failed to download the 470 patch set`
+
+A `legacy-470` (Kepler) build patches the driver with the community
+[`nvidia-470xx-linux-mainline`](https://github.com/joanbm/nvidia-470xx-linux-mainline) set,
+which it downloads from GitHub at the commit pinned as `PATCH_470XX_COMMIT` in
+`build-nvidia-sysext.sh`. If the host can't reach GitHub (or you want to try a newer patch
+set), place a copy of that repository next to the staged scripts and re-run the install; the
+build then uses it instead of downloading:
+
+```
+/mnt/<pool>/.config/nvidia-gpu/third_party/nvidia-470xx-linux-mainline/extract_and_patch
+/mnt/<pool>/.config/nvidia-gpu/third_party/nvidia-470xx-linux-mainline/patches/...
+```
+
 ## `open kernel modules don't exist before driver 515` / `predates Turing`
 
 You asked for `--kmod=open` on a card or driver that has no open-module path
