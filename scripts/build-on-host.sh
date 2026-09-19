@@ -191,6 +191,8 @@ fi
 #   /work/scripts     ← repo scripts (read-only)
 #   /work/cache       ← persistent cache (truenas.update + .run file)
 #   /work/out         ← output dir (we copy nvidia.raw out)
+#   /work/third_party ← host 470 patch set, when there is one (read-only;
+#                       see THIRD_PARTY_DIR below)
 #
 # build-nvidia-sysext.sh works in a per-run mktemp dir but bridges the two
 # large downloads through its fixed STAGE_DIR (/var/cache/nvidia-sysext-stage,
@@ -270,6 +272,20 @@ fi
 EOF
 )
 
+# The 470 legacy build patches the driver source with the
+# nvidia-470xx-linux-mainline set, which build-nvidia-sysext.sh looks for at
+# ../third_party relative to itself. Mount a host copy when there is one next
+# to the scripts dir: a git checkout with submodules initialized, or a copy
+# placed there by hand (for the installer's staged scripts that is
+# /mnt/<pool>/.config/nvidia-gpu/third_party/nvidia-470xx-linux-mainline).
+# Without one, build-nvidia-sysext.sh downloads the pinned upstream commit.
+THIRD_PARTY_DIR="$(dirname "$SCRIPTS_DIR")/third_party"
+EXTRA_MOUNTS=()
+if [ "${NVIDIA_VERSION%%.*}" = "470" ] \
+   && [ -f "${THIRD_PARTY_DIR}/nvidia-470xx-linux-mainline/extract_and_patch" ]; then
+    EXTRA_MOUNTS+=(-v "${THIRD_PARTY_DIR}:/work/third_party:ro")
+fi
+
 banner "Building nvidia.raw inside $DOCKER_IMAGE (≈ 8 min on first run)"
 info "  NVIDIA driver  : $NVIDIA_VERSION ($KERNEL_MODULE_TYPE)"
 info "  TrueNAS version: $TRUENAS_VERSION${TRUENAS_CODENAME:+ ($TRUENAS_CODENAME)}"
@@ -277,6 +293,9 @@ info "  Cache dir      : $CACHE_DIR"
 info "  Output         : $OUT_FILE"
 
 info "  Build log      : $BUILD_LOG"
+if [ "${#EXTRA_MOUNTS[@]}" -gt 0 ]; then
+    info "  470 patch set  : ${THIRD_PARTY_DIR}/nvidia-470xx-linux-mainline (host copy)"
+fi
 
 # Tee the whole container console to the persistent build log. PIPESTATUS[0]
 # (not $?) is docker's exit — $? would be tee's. Captured with set +e so the
@@ -286,6 +305,7 @@ docker run --rm \
     -v "${SCRIPTS_DIR}:/work/scripts:ro" \
     -v "${CACHE_DIR}:/work/cache" \
     -v "${OUT_DIR}:/work/out" \
+    "${EXTRA_MOUNTS[@]}" \
     -e DEBIAN_FRONTEND=noninteractive \
     "$DOCKER_IMAGE" \
     bash -c "$INNER_SCRIPT" 2>&1 | tee "$BUILD_LOG"
