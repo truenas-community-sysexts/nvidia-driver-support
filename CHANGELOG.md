@@ -26,6 +26,16 @@ All notable changes to `nvidia-driver-support` are documented here.
 - **`build-on-host.sh` handles INT/TERM explicitly** with the same run-once handler and
   130/143 exit codes (bash already ran its `EXIT` trap on a signal, so docker was restored; this
   makes the behavior explicit and consistent).
+- **Install no longer aborts mid-swap with "Hierarchy '/usr' is already merged".** The
+  installer toggled `docker.config.nvidia` with `midclt call docker.update` but without `-j`,
+  so it did not wait for the job. That job runs TrueNAS's nvidia handler (its own
+  `systemd-sysext refresh`, then a docker restart), which landed inside the installer's
+  unmerge/merge window; the installer's plain `merge` then failed and the install aborted after
+  the driver swap, leaving the docker nvidia toggle off. Seen on hardware on TrueNAS
+  26.0.0-BETA.3; the 25.10 middleware has the same job shape. Every `docker.update` in
+  `install-nvidia-driver.sh`, `recover-stock-nvidia.sh` and `uninstall-nvidia-driver.sh` now
+  uses `-j` (as the uninstaller's disable call already did), and the post-swap re-merge uses
+  `systemd-sysext refresh`, which is correct whether or not `/usr` was re-merged meanwhile.
 - **`install-nvidia-driver.sh` now restores the GPU release it does before the swap.** To
   free the GPU the install stops GPU-bound apps (`app.stop`) and toggles `docker.config.nvidia`
   off — but it never turned them back on, so after the swap + reboot apps came back with the

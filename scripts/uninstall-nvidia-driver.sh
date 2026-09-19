@@ -48,7 +48,7 @@ restore_state() {
         USR_WAS_WRITABLE=0
     fi
     if [ "$DOCKER_NVIDIA_DISABLED" = "1" ]; then
-        midclt call docker.update '{"nvidia": true}' >/dev/null 2>&1 || true
+        midclt call -j docker.update '{"nvidia": true}' >/dev/null 2>&1 || true
         DOCKER_NVIDIA_DISABLED=0
     fi
 }
@@ -131,12 +131,13 @@ else
 fi
 
 echo "Re-merging sysext..."
-systemd-sysext merge
+# refresh, not merge: tolerates /usr having been re-merged meanwhile.
+systemd-sysext refresh
 systemctl daemon-reload
 
 # Restore the nvidia toggle (persists across reboot).
 echo "Restoring nvidia toggle..."
-midclt call docker.update '{"nvidia": true}' >/dev/null 2>&1 || true
+midclt call -j docker.update '{"nvidia": true}' >/dev/null 2>&1 || true
 DOCKER_NVIDIA_DISABLED=0
 
 # ── Deregister the driver PREINIT ──
