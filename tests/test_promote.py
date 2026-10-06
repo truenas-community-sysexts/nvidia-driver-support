@@ -3,7 +3,7 @@
 Each test closes a hardware-test issue against a canned release list and
 checks the release update and issue comment the workflow would make. The
 tracked trains come from the real .github/tracked-versions.json (25.10 is
-stable, 26 is preview)."""
+stable, 27 is preview)."""
 import copy
 import unittest
 from pathlib import Path
@@ -181,10 +181,11 @@ class MakeLatest(unittest.TestCase):
         self.assertEqual(ml, "true")
         self.assertIn("marked Latest", comment)
 
-    def test_preview_approval_never_takes_latest(self):
+    def test_preview_approval_of_the_newest_release_takes_latest(self):
+        # Latest is the newest signed-off release on any train.
         ml, _ = self.latest(issue("v80", **PREVIEW),
                             [release("v80", prerelease=True), release("v79")])
-        self.assertEqual(ml, "false")
+        self.assertEqual(ml, "true")
 
     def test_older_stable_approval_does_not_regress_latest(self):
         ml, comment = self.latest(issue("v80", **STABLE),
@@ -193,11 +194,12 @@ class MakeLatest(unittest.TestCase):
         self.assertEqual(ml, "false")
         self.assertIn("Latest stays on the newer `v81`", comment)
 
-    def test_release_approved_on_preview_only_cannot_hold_latest(self):
+    def test_release_approved_on_a_preview_train_holds_latest(self):
+        # A newer release signed off on a preview train keeps Latest.
         ml, _ = self.latest(issue("v80", **STABLE),
                             [release("v81", trains=["26"]),
                              release("v80", prerelease=True), release("v79")])
-        self.assertEqual(ml, "true")
+        self.assertEqual(ml, "false")
 
     def test_grandfathered_newer_release_keeps_latest(self):
         ml, _ = self.latest(issue("v78", **STABLE),

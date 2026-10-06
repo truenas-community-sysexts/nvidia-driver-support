@@ -16,8 +16,9 @@ name: Promote release on hardware-test sign-off
 #     list, since most changes here land as direct pushes that PR-notes miss).
 #     Marker, flip and changelog go in ONE update: a full release without the
 #     marker would count as approved for every train, even for a moment;
-#   - GitHub's "Latest" follows the newest release approved for a stable
-#     train. It is cosmetic: nothing selects by it any more.
+#   - GitHub's "Latest" is the newest signed-off release on any train, by
+#     build order (the run number), so a release signed off late never moves
+#     it backwards. It is cosmetic: nothing selects by it any more.
 # An issue with no train marker predates per-train issues and keeps the old
 # behavior: full release, marked Latest, no marker (so every train).
 # Closed as "not planned": no change.
@@ -67,28 +68,25 @@ jobs:
             // (same pattern as get.sh's selection).
             const verifiedTrains = (r) => new Set(
               [...(r.body || '').matchAll(/^[ \t]*<!--\s*verified-train:\s*([^\s>]+?)\s*-->/gm)].map((m) => m[1]));
-            // Approved for any of the train keys: a marker for one of them, or
-            // grandfathered (a full release with no marker at all).
-            const approvedFor = (r, keys) => {
-              const trains = verifiedTrains(r);
-              if (trains.size) return keys.some((k) => trains.has(k));
-              return !r.prerelease && !previewRelease(r);
-            };
+            // Signed off: a full release some train installs, one with a
+            // verified-train marker or one with none at all (from before
+            // per-train sign-off, approved for every train).
+            const signedOff = (r) => !r.prerelease &&
+              (verifiedTrains(r).size > 0 || !previewRelease(r));
             // Tags are v<run_number>, so the run number is the whole rank.
             const rankOf = (r) => {
               const m = (r.tag_name || '').match(/^v(\d+)$/);
               return m ? { run: Number(m[1]) } : null;
             };
             const cmpRank = (a, b) => a.run - b.run;
-            // Latest = the newest release approved for a stable train. rel is
-            // the release as it will be after this update.
-            const decideMakeLatest = (rel, others, stableKeys) => {
-              const thisVer = approvedFor(rel, stableKeys) ? rankOf(rel) : null;
+            // Latest = the newest signed-off release on any train. rel is the
+            // release as it will be after this update.
+            const decideMakeLatest = (rel, others) => {
+              const thisVer = signedOff(rel) ? rankOf(rel) : null;
               let newest = thisVer;
               for (const r of others) {
-                // Prereleases can't be Latest, and neither can a release no
-                // stable train approved (verified on a preview train only).
-                if (r.prerelease || !approvedFor(r, stableKeys)) continue;
+                // A prerelease has not been signed off, so it can't be Latest.
+                if (!signedOff(r)) continue;
                 const v = rankOf(r);
                 if (v && (!newest || cmpRank(v, newest) > 0)) newest = v;
               }
@@ -188,7 +186,6 @@ jobs:
             }
             const tracked = JSON.parse(require('fs').readFileSync('.github/tracked-versions.json', 'utf8'));
             const trains = tracked.trains || [];
-            const stableKeys = trains.filter((t) => t.channel === 'stable').map((t) => t.key);
             const trainName = (trains.find((t) => t.key === train) || {}).name || `TrueNAS ${train}`;
             const link = `[\`${tag}\`](${release.html_url})`;
 
@@ -212,7 +209,7 @@ jobs:
             body += `\n\n<!-- verified-train: ${train} -->\n`;
 
             const { makeLatest, newest } = decideMakeLatest(
-              { ...release, prerelease: false, body }, rels, stableKeys);
+              { ...release, prerelease: false, body }, rels);
 
             await github.rest.repos.updateRelease({ owner, repo, release_id: release.id,
               prerelease: false, make_latest: makeLatest, body });
@@ -220,8 +217,8 @@ jobs:
             const notes = [`Verified on ${trainName}: ${link} is now approved for train \`${train}\`, so \`get.sh\` installs it on ${trainName} boxes.`];
             if (first) notes.push('This was its first approval: it is now a full release, and the changelog was appended.');
             if (makeLatest === 'true') {
-              notes.push('It is also marked Latest (the newest release approved for a stable train).');
-            } else if (stableKeys.includes(train) && newest) {
+              notes.push('It is also marked Latest (the newest signed-off release on any train).');
+            } else if (newest) {
               notes.push(`Latest stays on the newer \`v${newest.run}\`.`);
             }
             await github.rest.issues.createComment({ owner, repo, issue_number: issue.number,
