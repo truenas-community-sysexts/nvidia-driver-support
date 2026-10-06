@@ -910,12 +910,32 @@ do_check() {
     if command -v nvidia-smi >/dev/null 2>&1; then
         runtime_drv=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | tr -d '[:space:]' || true)
     fi
+    # nvidia-smi prints its errors on stdout ("Failed to initialize NVML:
+    # Driver/library version mismatch"), so only a version number counts.
+    [[ "$runtime_drv" =~ ^[0-9]+(\.[0-9]+)+$ ]] || runtime_drv=""
+    # The kernel module that is actually loaded; it stays the previous
+    # driver's until the reboot after an install.
+    local loaded_drv=""
+    loaded_drv=$(cat /sys/module/nvidia/version 2>/dev/null || true)
     if [ -n "$sysext_drv" ] && [ -n "$runtime_drv" ]; then
         if [ "$sysext_drv" = "$runtime_drv" ]; then
             record_pass "Driver versions match: sysext=${sysext_drv}, runtime=${runtime_drv}"
         else
             record_fail "Driver mismatch: sysext=${sysext_drv} but runtime=${runtime_drv}" \
                 "reboot to load the new kernel module from the sysext"
+        fi
+    elif [ -n "$sysext_drv" ] && [ -n "$loaded_drv" ] && [ "$sysext_drv" != "$loaded_drv" ]; then
+        # The new userspace meets the old module. That clears at the reboot
+        # only if the sysext ships modules for this kernel; after a TrueNAS
+        # update that changed the kernel it does not, and only a rebuild helps.
+        local kver
+        kver=$(uname -r)
+        if [[ " $(raw_module_kernels "$LIVE_NVIDIA") " == *" ${kver} "* ]]; then
+            record_warn "Reboot pending: sysext=${sysext_drv}, loaded kernel module=${loaded_drv}" \
+                "reboot to load the new kernel module from the sysext (nvidia-smi fails until then)"
+        else
+            record_fail "Sysext driver ${sysext_drv} has no kernel modules for ${kver} (loaded module: ${loaded_drv})" \
+                "TrueNAS changed the kernel; rebuild the driver: curl -fsSL ${RAW_BASE}/get.sh | sudo bash -s -- --rebuild"
         fi
     elif [ -n "$sysext_drv" ]; then
         record_warn "Sysext driver=${sysext_drv}; could not query nvidia-smi" \
