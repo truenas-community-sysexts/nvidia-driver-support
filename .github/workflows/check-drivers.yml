@@ -93,6 +93,9 @@ jobs:
           CHANGE_SUMMARY: ${{ steps.commit.outputs.summary }}
         with:
           github-token: ${{ steps.app-token.outputs.token }}
+          # The catalog commit is already pushed, so a dispatch lost to a
+          # transient GitHub error is never retried by a later run. Retry 5xx.
+          retries: 4
           script: |
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
