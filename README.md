@@ -11,7 +11,7 @@ Then reboot if install was ok. To go back to the stock driver later:
 curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/nvidia-driver-support/main/get.sh | sudo bash -s -- --uninstall
 ```
 
-`get.sh` runs the installer from the newest release that a hardware test approved for your TrueNAS train (25.10, or 26 for every 26.x including betas); see [Releases](#releases).
+`get.sh` runs the installer from the newest release that a hardware test approved for your TrueNAS train (25.10; from 26 on the major version, so 27 for every 27.x release including RCs); see [Releases](#releases).
 
 > **Driver-only.** This repo owns the **driver swap**. If you want **MIG** on a Blackwell card, install [`nvidia-mig-support`](https://github.com/truenas-community-sysexts/nvidia-mig-support) after the reboot. The MIG sysext layers on top of whatever driver is present.  see [MIG coexistence](#coexistence-with-nvidia-mig-support).)
 
