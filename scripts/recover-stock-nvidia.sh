@@ -123,11 +123,61 @@ prepare_download_resume() {
 [ -n "$VERSION" ] || VERSION=$(cat /etc/version 2>/dev/null | tr -d '[:space:]')
 [ -n "$VERSION" ] || { echo "ERROR: cannot determine TrueNAS version, pass --version=X.Y.Z" >&2; exit 1; }
 
+# BEGIN update-url (a verbatim copy lives in build-nvidia-sysext.sh;
+# .github/scripts/test-stock-backup-guards.sh fails CI when the copies differ)
+
+# File name of a TrueNAS version's .update: TrueNAS-SCALE-<v>.update up to
+# 25.x, TrueNAS-<v>.update from 26 on.
+build_update_filename() {
+    local major="${1%%.*}"
+    case "$major" in ''|*[!0-9]*) major=0 ;; esac
+    if [ "$major" -ge 26 ]; then
+        printf 'TrueNAS-%s.update\n' "$1"
+    else
+        printf 'TrueNAS-SCALE-%s.update\n' "$1"
+    fi
+}
+
+# Download URL of a TrueNAS version's .update. Up to 25.x it is on
+# download.truenas.com under the train codename ($2). A 26-or-later BETA/RC is
+# on update-public.sys.truenas.net in a directory named for its major version
+# and stage: TrueNAS-26-BETA/ for 26.0.0-BETA.3, TrueNAS-27-RC/ for
+# 27.0.0-RC.1 (TrueNAS 26 was renamed 27 at RC.1). A 26-or-later release with
+# no BETA/RC suffix has no known location yet, so this fails and the caller
+# asks for --update-file.
+build_update_url() {
+    local version="$1" codename="$2" major stage fname
+    fname="$(build_update_filename "$version")"
+    major="${version%%.*}"
+    case "$major" in ''|*[!0-9]*) return 1 ;; esac
+    if [ "$major" -ge 26 ]; then
+        case "$version" in
+            *-BETA.*) stage=BETA ;;
+            *-RC.*)   stage=RC ;;
+            *)        return 1 ;;
+        esac
+        printf 'https://update-public.sys.truenas.net/TrueNAS-%s-%s/%s\n' \
+            "$major" "$stage" "$fname"
+        return 0
+    fi
+    [ -n "$codename" ] || return 1
+    printf 'https://download.truenas.com/TrueNAS-SCALE-%s/%s/%s?download=1\n' \
+        "$codename" "$version" "$fname"
+}
+# END update-url
+
 case "$VERSION" in
-    25.*) CODENAME="Goldeye"; URL_FILE="TrueNAS-SCALE-${VERSION}.update" ;;
-    26.*) CODENAME=""; URL_FILE="TrueNAS-${VERSION}.update" ;;
-    *) echo "ERROR: unsupported version pattern: $VERSION" >&2; exit 1 ;;
+    25.*) CODENAME="Goldeye" ;;
+    *)    CODENAME="" ;;
 esac
+# Fail before any download when there is no file to use and no known place
+# to fetch one from.
+if [ -z "$UPDATE_FILE" ]; then
+    URL="$(build_update_url "$VERSION" "$CODENAME")" || {
+        echo "ERROR: no known download location for the TrueNAS ${VERSION} .update; pass --update-file=PATH" >&2
+        exit 1
+    }
+fi
 
 # --- Resolve persistent storage location ---
 # resolve_persist_dir is duplicated verbatim across install-nvidia-driver.sh,
@@ -229,7 +279,7 @@ WORK="${PERSIST}/recovery"
 SYSEXT_DIR="/usr/share/truenas/sysext-extensions"
 
 echo "=== Recover stock nvidia.raw ==="
-echo "Version:  $VERSION ($CODENAME)"
+echo "Version:  ${VERSION}${CODENAME:+ ($CODENAME)}"
 echo "Persist:  $PERSIST"
 echo "Workdir:  $WORK"
 echo ""
@@ -242,11 +292,6 @@ if [ -n "$UPDATE_FILE" ]; then
     echo "Using preloaded update file: $UPDATE_FILE"
 else
     UPDATE_FILE="${WORK}/truenas.update"
-    if [ "$CODENAME" = "Goldeye" ]; then
-        URL="https://download.truenas.com/TrueNAS-SCALE-${CODENAME}/${VERSION}/${URL_FILE}?download=1"
-    else
-        URL="https://update-public.sys.truenas.net/TrueNAS-26-BETA/${URL_FILE}"
-    fi
     # Checksum sidecar next to the .update (any ?download=1 query goes after
     # the .sha256 suffix), fetched before the ~2 GB download so a problem
     # fails fast. As in build-nvidia-sysext.sh, only a definitive 404 (no

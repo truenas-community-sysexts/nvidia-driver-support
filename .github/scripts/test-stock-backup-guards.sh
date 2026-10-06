@@ -44,6 +44,17 @@ for fn in raw_module_kernels stock_backup_problem; do
     done
 done
 
+# The .update URL helpers are identical in the builder and the recovery script.
+for fn in build_update_filename build_update_url; do
+    ref="$(fn_src "$S/build-nvidia-sysext.sh" "$fn")"
+    if [ -z "$ref" ]; then fail "$fn not found in build-nvidia-sysext.sh"; continue; fi
+    if [ "$(fn_src "$S/recover-stock-nvidia.sh" "$fn")" = "$ref" ]; then
+        pass "$fn in recover-stock-nvidia.sh matches build-nvidia-sysext.sh"
+    else
+        fail "$fn in recover-stock-nvidia.sh differs from build-nvidia-sysext.sh"
+    fi
+done
+
 eval "$(fn_src "$S/install-nvidia-driver.sh" raw_module_kernels)"
 eval "$(fn_src "$S/install-nvidia-driver.sh" stock_backup_problem)"
 eval "$(fn_src "$S/recover-stock-nvidia.sh" prepare_download_resume)"
@@ -97,8 +108,33 @@ expect "unreadable backup is stale" \
 expect "raw_module_kernels lists every kernel, space-separated" \
     "${OLD} ${RUNNING}" "$(raw_module_kernels "$TMP/both.raw")"
 
+# ── .update download URLs: the channel directory follows the version ──
+eval "$(fn_src "$S/build-nvidia-sysext.sh" build_update_filename)"
+eval "$(fn_src "$S/build-nvidia-sysext.sh" build_update_url)"
+expect "25.x is on download.truenas.com under its codename" \
+    "https://download.truenas.com/TrueNAS-SCALE-Goldeye/25.10.7/TrueNAS-SCALE-25.10.7.update?download=1" \
+    "$(build_update_url 25.10.7 Goldeye)"
+expect "25.x without a codename has no URL" \
+    "fail" "$(build_update_url 25.10.7 '' || echo fail)"
+expect "a 26 beta is in TrueNAS-26-BETA" \
+    "https://update-public.sys.truenas.net/TrueNAS-26-BETA/TrueNAS-26.0.0-BETA.3.update" \
+    "$(build_update_url 26.0.0-BETA.3 '')"
+expect "a 27 RC is in TrueNAS-27-RC" \
+    "https://update-public.sys.truenas.net/TrueNAS-27-RC/TrueNAS-27.0.0-RC.1.update" \
+    "$(build_update_url 27.0.0-RC.1 '')"
+expect "a later major's beta is in its own channel" \
+    "https://update-public.sys.truenas.net/TrueNAS-28-BETA/TrueNAS-28.0.0-BETA.1.update" \
+    "$(build_update_url 28.0.0-BETA.1 '')"
+expect "a 27 release with no BETA/RC suffix has no known URL" \
+    "fail" "$(build_update_url 27.0.0 '' || echo fail)"
+expect "an unparseable version has no URL" \
+    "fail" "$(build_update_url garbage Goldeye || echo fail)"
+expect "file name drops SCALE from 26 on" \
+    "TrueNAS-27.0.0-RC.1.update|TrueNAS-SCALE-25.10.7.update" \
+    "$(build_update_filename 27.0.0-RC.1)|$(build_update_filename 25.10.7)"
+
 # ── recover-stock-nvidia.sh: resume only a partial of the same URL ──
-URL_NEW="https://update-public.sys.truenas.net/TrueNAS-26-BETA/TrueNAS-26.0.0-BETA.3.update"
+URL_NEW="https://update-public.sys.truenas.net/TrueNAS-27-RC/TrueNAS-27.0.0-RC.1.update"
 URL_OLD="https://download.truenas.com/TrueNAS-SCALE-Goldeye/25.10.1/TrueNAS-SCALE-25.10.1.update?download=1"
 W="$TMP/recovery"
 mkdir -p "$W"

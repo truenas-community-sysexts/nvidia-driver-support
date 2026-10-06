@@ -6,6 +6,6 @@
   },
   "trains": [
     {"key": "25.10", "name": "TrueNAS 25.10", "channel": "stable"},
-    {"key": "26", "name": "TrueNAS 26 beta", "channel": "preview"}
+    {"key": "27", "name": "TrueNAS 27 RC", "channel": "preview"}
   ]
 }

@@ -62,7 +62,7 @@ for arg in "$@"; do
     esac
 done
 
-# Auto-detect codename for 25.x (Goldeye); 26.x uses BETA URL pattern
+# Auto-detect codename for 25.x (Goldeye); 26 and later need none (see build_update_url)
 if [ -z "$TRUENAS_CODENAME" ] && [[ "$TRUENAS_VERSION" =~ ^25\. ]]; then
     TRUENAS_CODENAME="Goldeye"
 fi
@@ -140,26 +140,48 @@ banner() { printf "\n==========================================================\
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
+# BEGIN update-url (a verbatim copy lives in recover-stock-nvidia.sh;
+# .github/scripts/test-stock-backup-guards.sh fails CI when the copies differ)
+
+# File name of a TrueNAS version's .update: TrueNAS-SCALE-<v>.update up to
+# 25.x, TrueNAS-<v>.update from 26 on.
 build_update_filename() {
-    case "$1" in
-        26.*) printf 'TrueNAS-%s.update\n' "$1" ;;
-        *)    printf 'TrueNAS-SCALE-%s.update\n' "$1" ;;
-    esac
+    local major="${1%%.*}"
+    case "$major" in ''|*[!0-9]*) major=0 ;; esac
+    if [ "$major" -ge 26 ]; then
+        printf 'TrueNAS-%s.update\n' "$1"
+    else
+        printf 'TrueNAS-SCALE-%s.update\n' "$1"
+    fi
 }
 
+# Download URL of a TrueNAS version's .update. Up to 25.x it is on
+# download.truenas.com under the train codename ($2). A 26-or-later BETA/RC is
+# on update-public.sys.truenas.net in a directory named for its major version
+# and stage: TrueNAS-26-BETA/ for 26.0.0-BETA.3, TrueNAS-27-RC/ for
+# 27.0.0-RC.1 (TrueNAS 26 was renamed 27 at RC.1). A 26-or-later release with
+# no BETA/RC suffix has no known location yet, so this fails and the caller
+# asks for --update-file.
 build_update_url() {
-    local version="$1" codename="$2"
-    local fname
+    local version="$1" codename="$2" major stage fname
     fname="$(build_update_filename "$version")"
-    case "$version" in
-        26.*) printf 'https://update-public.sys.truenas.net/TrueNAS-26-BETA/%s\n' "$fname" ;;
-        *)
-            [ -n "$codename" ] || return 1
-            printf 'https://download.truenas.com/TrueNAS-SCALE-%s/%s/%s?download=1\n' \
-                "$codename" "$version" "$fname"
-            ;;
-    esac
+    major="${version%%.*}"
+    case "$major" in ''|*[!0-9]*) return 1 ;; esac
+    if [ "$major" -ge 26 ]; then
+        case "$version" in
+            *-BETA.*) stage=BETA ;;
+            *-RC.*)   stage=RC ;;
+            *)        return 1 ;;
+        esac
+        printf 'https://update-public.sys.truenas.net/TrueNAS-%s-%s/%s\n' \
+            "$major" "$stage" "$fname"
+        return 0
+    fi
+    [ -n "$codename" ] || return 1
+    printf 'https://download.truenas.com/TrueNAS-SCALE-%s/%s/%s?download=1\n' \
+        "$codename" "$version" "$fname"
 }
+# END update-url
 
 select_build_cc() {
     if [ -n "$NVIDIA_BUILD_CC" ]; then
