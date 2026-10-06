@@ -16,6 +16,12 @@ permissions:
   contents: write
   actions: write
 
+# One refresh at a time: a second run waits, then reads the first one's
+# commit (see the checkout below).
+concurrency:
+  group: check-drivers
+  cancel-in-progress: false
+
 jobs:
   refresh:
     runs-on: ubuntu-latest
@@ -33,6 +39,12 @@ jobs:
       - uses: actions/checkout@v7
         with:
           token: ${{ steps.app-token.outputs.token }}
+          # main's tip when the job starts, not the commit the run was
+          # queued at. Runs are serialized (concurrency above), so a run that
+          # waited behind another one must see the version bump that run
+          # pushed; reading the older commit, it would bump and dispatch the
+          # same build again.
+          ref: main
 
       - name: Refresh catalog from NVIDIA index
         run: python3 .github/scripts/refresh-catalog.py --summary-file "$RUNNER_TEMP/catalog-changes.md"
