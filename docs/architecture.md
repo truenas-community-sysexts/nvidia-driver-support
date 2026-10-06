@@ -124,8 +124,8 @@ versions — a kernel bump just triggers an on-host rebuild. (This is why the ol
 - [`promote.yml`](../.github/workflows/promote.yml): closing a train's issue as completed
   approves the release for that train only: it appends `<!-- verified-train: KEY -->` to the
   release notes, and on the first approval also flips the release out of pre-release and
-  appends the changelog, in the same update. GitHub's "Latest" follows the newest release
-  approved for a stable train, but nothing selects by it. An issue with no train marker (from
+  appends the changelog, in the same update. GitHub's "Latest" is the newest release
+  signed off on any train (by run number), but nothing selects by it. An issue with no train marker (from
   before per-train issues) keeps the old behavior: full release, Latest, no marker.
 - [`check-drivers.yml`](../.github/workflows/check-drivers.yml) — daily; refreshes the picker
   catalog from the NVIDIA index. `open_latest` is newest-per-major, bounded by `latest.txt`
