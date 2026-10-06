@@ -236,7 +236,7 @@ jobs:
                   "```bash",
                   `curl -fsSL ${base}/recover-stock-nvidia.sh | sudo bash`,
                   "```",
-                  `A backup that exists can still be stale: it holds the stock driver of the TrueNAS version it was made on. One made before the last TrueNAS update (for example 25.10 to 26) is built for the old kernel, and restoring it would put that driver on the new one. Compare the date \`ls -l\` printed with the creation date of the running boot environment (normally when this TrueNAS version was installed), and check which kernel the backup's modules are for:`,
+                  `A backup that exists can still be stale: it holds the stock driver of the TrueNAS version it was made on. One made before the last TrueNAS update (for example 25.10 to 27) is built for the old kernel, and restoring it would put that driver on the new one. Compare the date \`ls -l\` printed with the creation date of the running boot environment (normally when this TrueNAS version was installed), and check which kernel the backup's modules are for:`,
                   "```bash",
                   `zfs list -H -o name,creation /   # running boot environment and when it was created`,
                   `unsquashfs -l /mnt/*/.config/nvidia-gpu/nvidia-original.raw 'usr/lib/modules/*' | grep -c "/$(uname -r)/"   # 0 means the backup is for another kernel`,
