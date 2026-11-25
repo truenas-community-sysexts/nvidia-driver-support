@@ -264,7 +264,7 @@ select_installer_flags() {
         --kernel-name="$KERNEL_VERSION"
 
     # Kernel-module flavor: only on 515+ installers that advertise it.
-    if [ "$major" -ge 515 ] 2>/dev/null && printf '%s' "$help" | grep -q -- '--kernel-module-type'; then
+    if [ "$major" -ge 515 ] 2>/dev/null && [[ "$help" == *--kernel-module-type* ]]; then
         printf '%s\n' --kernel-module-type="$NVIDIA_KERNEL_MODULE_TYPE"
     fi
 
@@ -274,7 +274,11 @@ select_installer_flags() {
         --no-rebuild-initramfs --skip-module-load --no-x-check \
         --no-nouveau-check --no-backup --no-systemd --no-drm \
         --install-libglvnd --allow-installation-with-running-driver; do
-        if printf '%s' "$help" | grep -q -- "$flag"; then
+        # Substring match in the shell, not `printf | grep -q`: under pipefail,
+        # grep -q exits on the first match and printf can take SIGPIPE, failing
+        # the pipeline and silently dropping an advertised flag (seen in the
+        # build container on a busy host, where it lost --skip-module-load).
+        if [[ "$help" == *"$flag"* ]]; then
             printf '%s\n' "$flag"
         else
             warn "Installer for $NVIDIA_VERSION does not advertise ${flag}; omitting"
