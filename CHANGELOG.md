@@ -174,3 +174,12 @@ All notable changes to `nvidia-driver-support` are documented here.
   the sysext (`/usr/bin/uninstall-nvidia-driver`).
 - Shares `/mnt/<pool>/.config/nvidia-gpu/` with `nvidia-mig-support`; documented as the
   driver-swap owner so MIG layers on top in its default mode.
+
+### Fixed
+
+- **The installer-flag probe no longer drops advertised flags under SIGPIPE.**
+  `select_installer_flags` tested the `--advanced-options` output with `printf | grep -q` under
+  `set -o pipefail`; when `grep -q` exits early, `printf` can get SIGPIPE and the pipeline fails,
+  so a flag the installer does advertise was omitted. On a busy host this dropped
+  `--skip-module-load`, and the build then failed with `Kernel module load error: Operation not
+  permitted` (#132). The probe now uses a shell substring match.
